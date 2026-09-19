@@ -134,6 +134,7 @@ private fun OcrCameraContent(
     var obstacleAlertsEnabled by remember { mutableStateOf(false) }
     var warningDistanceMeters by remember { mutableStateOf(2f) }
     var lastObstacleAlert by remember { mutableStateOf<String?>(null) }
+    var sceneAwareness by remember { mutableStateOf<SceneAwarenessResult?>(null) }
     val obstacleAlertManager = remember {
         ObstacleAlertManager(speak = speakObstacleAlert)
     }
@@ -156,8 +157,10 @@ private fun OcrCameraContent(
             ArCoreDepthPreview(
                 frameResult = frameResult,
                 objectDetections = objectDetections,
+                sceneAwareness = sceneAwareness,
                 onResult = { frameResult = it; cameraError = null },
                 onObjectDetections = { objectDetections = it; cameraError = null },
+                onSceneAwareness = { sceneAwareness = it },
                 onStatus = { depthStatus = it },
                 onError = { cameraError = it },
                 modifier = Modifier.fillMaxWidth().weight(3f)
@@ -223,7 +226,11 @@ private fun OcrCameraContent(
             style = MaterialTheme.typography.bodySmall
         )
         depthStatus.message?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-        Button(onClick = { useDepthMode = !useDepthMode }) {
+        SceneAwarenessPanel(sceneAwareness)
+        Button(onClick = {
+            useDepthMode = !useDepthMode
+            sceneAwareness = null
+        }) {
             Text(if (useDepthMode) "USE CAMERA-ONLY FALLBACK" else "USE ARCORE DEPTH")
         }
 
@@ -270,8 +277,10 @@ private fun OcrCameraContent(
 private fun ArCoreDepthPreview(
     frameResult: OcrFrameResult,
     objectDetections: List<VisionObjectDetection>,
+    sceneAwareness: SceneAwarenessResult?,
     onResult: (OcrFrameResult) -> Unit,
     onObjectDetections: (List<VisionObjectDetection>) -> Unit,
+    onSceneAwareness: (SceneAwarenessResult) -> Unit,
     onStatus: (ArDepthStatus) -> Unit,
     onError: (String) -> Unit,
     modifier: Modifier = Modifier
@@ -284,6 +293,7 @@ private fun ArCoreDepthPreview(
             context,
             onText = { mainExecutor.execute { onResult(it) } },
             onObjects = { mainExecutor.execute { onObjectDetections(it) } },
+            onSceneAwareness = { mainExecutor.execute { onSceneAwareness(it) } },
             onStatus = { mainExecutor.execute { onStatus(it) } },
             onError = { mainExecutor.execute { onError(it) } }
         )
@@ -306,6 +316,72 @@ private fun ArCoreDepthPreview(
     Box(modifier = modifier.background(Color.Black)) {
         AndroidView(factory = { view }, modifier = Modifier.fillMaxSize())
         VisionBoundingBoxOverlay(frameResult, objectDetections, Modifier.fillMaxSize())
+        SceneZoneOverlay(sceneAwareness = sceneAwareness, modifier = Modifier.fillMaxSize())
+    }
+}
+
+@Composable
+private fun SceneAwarenessPanel(result: SceneAwarenessResult?) {
+    fun line(label: String, distance: Float?, state: SceneZoneState): String =
+        "$label: ${distance?.let { String.format(java.util.Locale.US, "%.1f m", it) } ?: "--"} $state"
+    val value = result ?: SceneAwarenessResult()
+    Text(
+        text = buildString {
+            appendLine(line("LEFT", value.leftDistanceMeters, value.leftState))
+            appendLine(line("CENTER", value.centerDistanceMeters, value.centerState))
+            appendLine(line("RIGHT", value.rightDistanceMeters, value.rightState))
+            append("Recommendation: ${value.recommendedDirection}")
+        },
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(8.dp),
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        style = MaterialTheme.typography.bodySmall
+    )
+}
+
+@Composable
+private fun SceneZoneOverlay(
+    sceneAwareness: SceneAwarenessResult?,
+    modifier: Modifier = Modifier
+) {
+    val states = listOf(
+        sceneAwareness?.leftState ?: SceneZoneState.UNKNOWN,
+        sceneAwareness?.centerState ?: SceneZoneState.UNKNOWN,
+        sceneAwareness?.rightState ?: SceneZoneState.UNKNOWN
+    )
+    val clearColor = Color(0xFF2E7D32)
+    val cautionColor = Color(0xFFF9A825)
+    val blockedColor = Color(0xFFC62828)
+    val unknownColor = Color(0xFF607D8B)
+    Canvas(modifier = modifier) {
+        val left = size.width * SceneAwarenessAnalyzer.REGION_LEFT
+        val top = size.height * SceneAwarenessAnalyzer.REGION_TOP
+        val regionWidth = size.width *
+            (SceneAwarenessAnalyzer.REGION_RIGHT - SceneAwarenessAnalyzer.REGION_LEFT)
+        val zoneWidth = regionWidth / 3f
+        val regionHeight = size.height *
+            (SceneAwarenessAnalyzer.REGION_BOTTOM - SceneAwarenessAnalyzer.REGION_TOP)
+        states.forEachIndexed { index, state ->
+            val color = when (state) {
+                SceneZoneState.CLEAR -> clearColor
+                SceneZoneState.CAUTION -> cautionColor
+                SceneZoneState.BLOCKED -> blockedColor
+                SceneZoneState.UNKNOWN -> unknownColor
+            }
+            drawRect(
+                color = color.copy(alpha = 0.16f),
+                topLeft = Offset(left + index * zoneWidth, top),
+                size = Size(zoneWidth, regionHeight)
+            )
+            drawRect(
+                color = color.copy(alpha = 0.75f),
+                topLeft = Offset(left + index * zoneWidth, top),
+                size = Size(zoneWidth, regionHeight),
+                style = Stroke(width = 1.dp.toPx())
+            )
+        }
     }
 }
 

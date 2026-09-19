@@ -26,18 +26,22 @@ class ArCoreVisionProcessor(
     context: Context,
     private val onText: (OcrFrameResult) -> Unit,
     private val onObjects: (List<VisionObjectDetection>) -> Unit,
+    private val onSceneAwareness: (SceneAwarenessResult) -> Unit,
     private val onError: (String) -> Unit
 ) : Closeable {
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
     private val busy = AtomicBoolean(false)
     private val detector = ObjectDetectionEngine(context)
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    private val sceneAwarenessAnalyzer = SceneAwarenessAnalyzer()
     private var lastOcrMillis = 0L
 
     fun submit(frame: CameraYuvFrame, rotation: Int, depth: DepthFrame?) {
         if (!busy.compareAndSet(false, true)) return
         executor.execute {
             try {
+                depth?.let { sceneAwarenessAnalyzer.analyzeIfDue(it) }
+                    ?.let(onSceneAwareness)
                 val bitmap = frame.toBitmap()
                 val uprightWidth = if (rotation == 90 || rotation == 270) frame.height else frame.width
                 val uprightHeight = if (rotation == 90 || rotation == 270) frame.width else frame.height

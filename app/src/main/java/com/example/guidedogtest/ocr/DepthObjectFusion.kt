@@ -9,7 +9,9 @@ data class DepthFrame(
     val millimeters: IntArray,
     val timestampNanos: Long,
     /** IMAGE_PIXELS camera-image corners TL, TR, BL transformed to TEXTURE_NORMALIZED. */
-    val textureCorners: FloatArray
+    val textureCorners: FloatArray,
+    /** Display-space TL, TR, BL mapped from OpenGL NDC into the depth texture. */
+    val displayTextureCorners: FloatArray
 )
 
 object DepthObjectFusion {

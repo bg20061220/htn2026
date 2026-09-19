@@ -32,10 +32,13 @@ class ArCoreDepthCameraView(
     context: Context,
     onText: (OcrFrameResult) -> Unit,
     onObjects: (List<VisionObjectDetection>) -> Unit,
+    onSceneAwareness: (SceneAwarenessResult) -> Unit,
     private val onStatus: (ArDepthStatus) -> Unit,
     onError: (String) -> Unit
 ) : GLSurfaceView(context) {
-    private val processor = ArCoreVisionProcessor(context, onText, onObjects, onError)
+    private val processor = ArCoreVisionProcessor(
+        context, onText, onObjects, onSceneAwareness, onError
+    )
     private val session: Session
     private val depthSupported: Boolean
     private val renderer: CameraRenderer
@@ -149,9 +152,26 @@ private class CameraRenderer(
             frame.transformCoordinates2d(Coordinates2d.IMAGE_PIXELS, input, Coordinates2d.TEXTURE_NORMALIZED, output)
             val corners = FloatArray(6)
             output.rewind(); output.get(corners)
+            val displayInput = floatBuffer(floatArrayOf(-1f, 1f, 1f, 1f, -1f, -1f))
+            val displayOutput = floatBuffer(FloatArray(6))
+            frame.transformCoordinates2d(
+                Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES,
+                displayInput,
+                Coordinates2d.TEXTURE_NORMALIZED,
+                displayOutput
+            )
+            val displayCorners = FloatArray(6)
+            displayOutput.rewind(); displayOutput.get(displayCorners)
             latestDepthTimestamp = depthImage.timestamp
             onStatus(ArDepthStatus(true, true, latestDepthTimestamp))
-            DepthFrame(depthImage.width, depthImage.height, values, depthImage.timestamp, corners)
+            DepthFrame(
+                depthImage.width,
+                depthImage.height,
+                values,
+                depthImage.timestamp,
+                corners,
+                displayCorners
+            )
         } finally {
             depthImage.close()
         }
