@@ -1,7 +1,9 @@
 package com.example.guidedogtest
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -38,9 +40,20 @@ import com.google.ar.core.Config
 import com.google.ar.core.Session
 import com.google.maps.android.compose.GoogleMap
 import com.google.maps.android.compose.Marker
+import com.google.maps.android.compose.Polyline
 import com.google.maps.android.compose.rememberCameraPositionState
 import com.google.maps.android.compose.rememberUpdatedMarkerState
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
+import java.security.MessageDigest
+import java.util.Locale
+import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
 
@@ -49,13 +62,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         if (!Places.isInitialized()) {
-            val applicationInfo = packageManager.getApplicationInfo(
-                packageName,
-                PackageManager.GET_META_DATA
-            )
-            val mapsApiKey = applicationInfo.metaData
-                ?.getString("com.google.android.geo.API_KEY")
-                .orEmpty()
+            val mapsApiKey = getMapsApiKey(this)
             if (mapsApiKey.isNotBlank()) {
                 Places.initializeWithNewPlacesApiEnabled(applicationContext, mapsApiKey)
             }
@@ -73,6 +80,7 @@ class MainActivity : ComponentActivity() {
 fun NavigationScreen() {
 
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
 
     val fusedLocationClient =
         remember { LocationServices.getFusedLocationProviderClient(context) }
@@ -84,6 +92,12 @@ fun NavigationScreen() {
     var placeSuggestions by remember { mutableStateOf<List<AutocompletePrediction>>(emptyList()) }
     var autocompleteToken by remember { mutableStateOf<AutocompleteSessionToken?>(null) }
     var destinationSearchError by remember { mutableStateOf<String?>(null) }
+    var routePoints by remember { mutableStateOf<List<LatLng>>(emptyList()) }
+    var routeDistance by remember { mutableStateOf<String?>(null) }
+    var routeDuration by remember { mutableStateOf<String?>(null) }
+    var routeInstructions by remember { mutableStateOf<List<String>>(emptyList()) }
+    var routeMessage by remember { mutableStateOf<String?>(null) }
+    var routeLoading by remember { mutableStateOf(false) }
     var command by remember { mutableStateOf("STOP") }
 
     var latitude by remember { mutableStateOf("Unknown") }
@@ -106,9 +120,24 @@ fun NavigationScreen() {
         position = CameraPosition.fromLatLngZoom(fallbackLocation, 1f)
     }
 
-    LaunchedEffect(currentLocation, destinationLocation) {
+    LaunchedEffect(currentLocation, destinationLocation, routePoints) {
         val selectedDestination = destinationLocation
         when {
+            routePoints.isNotEmpty() -> {
+                val boundsBuilder = LatLngBounds.builder()
+                routePoints.forEach(boundsBuilder::include)
+                currentLocation?.let(boundsBuilder::include)
+                selectedDestination?.let(boundsBuilder::include)
+                try {
+                    cameraPositionState.animate(
+                        CameraUpdateFactory.newLatLngBounds(boundsBuilder.build(), 100)
+                    )
+                } catch (_: IllegalStateException) {
+                    cameraPositionState.animate(
+                        CameraUpdateFactory.newLatLngZoom(routePoints.first(), 14f)
+                    )
+                }
+            }
             currentLocation != null && selectedDestination != null -> {
                 val bounds = LatLngBounds.builder()
                     .include(currentLocation)
@@ -227,6 +256,8 @@ fun NavigationScreen() {
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
+
+        val routePolylineColor = MaterialTheme.colorScheme.primary
 
         Text(
             text = "MyPetGoose",
@@ -364,6 +395,13 @@ fun NavigationScreen() {
                     title = destinationName ?: "Destination"
                 )
             }
+            if (routePoints.isNotEmpty()) {
+                Polyline(
+                    points = routePoints,
+                    color = routePolylineColor,
+                    width = 12f
+                )
+            }
         }
 
         Spacer(modifier = Modifier.height(20.dp))
@@ -375,9 +413,33 @@ fun NavigationScreen() {
                 if (value != destinationName) {
                     destinationName = null
                     destinationLocation = null
+                    routePoints = emptyList()
+                    routeDistance = null
+                    routeDuration = null
+                    routeInstructions = emptyList()
+                    routeMessage = null
                 }
             },
             label = { Text("Destination") },
+            placeholder = { Text("Search for a destination") },
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
+                disabledTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+                cursorColor = MaterialTheme.colorScheme.primary,
+                focusedContainerColor = MaterialTheme.colorScheme.surface,
+                unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                disabledContainerColor = MaterialTheme.colorScheme.surface,
+                focusedLabelColor = MaterialTheme.colorScheme.primary,
+                unfocusedLabelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                disabledLabelColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+                focusedPlaceholderColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                unfocusedPlaceholderColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                disabledPlaceholderColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                unfocusedBorderColor = MaterialTheme.colorScheme.outline,
+                disabledBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.38f)
+            ),
             modifier = Modifier.fillMaxWidth()
         )
 
@@ -404,6 +466,11 @@ fun NavigationScreen() {
                                     destination = name
                                     destinationName = name
                                     destinationLocation = location
+                                    routePoints = emptyList()
+                                    routeDistance = null
+                                    routeDuration = null
+                                    routeInstructions = emptyList()
+                                    routeMessage = null
                                     placeSuggestions = emptyList()
                                     destinationSearchError = null
                                     autocompleteToken = null
@@ -413,18 +480,22 @@ fun NavigationScreen() {
                                 destinationSearchError = "Unable to load the selected place"
                             }
                     },
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 tonalElevation = 2.dp
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
                     Text(
                         text = prediction.getPrimaryText(null).toString(),
-                        style = MaterialTheme.typography.bodyLarge
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     val secondaryText = prediction.getSecondaryText(null).toString()
                     if (secondaryText.isNotBlank()) {
                         Text(
                             text = secondaryText,
-                            style = MaterialTheme.typography.bodySmall
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
@@ -443,11 +514,101 @@ fun NavigationScreen() {
 
         Button(
             onClick = {
-                command = "Route requested: $destination"
+                val origin = currentLocation
+                val selectedDestination = destinationLocation
+                when {
+                    origin == null -> {
+                        routeMessage = "Current GPS location is unavailable. Tap GET CURRENT LOCATION first."
+                    }
+                    selectedDestination == null -> {
+                        routeMessage = "Select a destination from the place suggestions first."
+                    }
+                    else -> coroutineScope.launch {
+                        routeLoading = true
+                        routeMessage = null
+                        routePoints = emptyList()
+                        routeDistance = null
+                        routeDuration = null
+                        routeInstructions = emptyList()
+
+                        try {
+                            val apiKey = getMapsApiKey(context)
+                            if (apiKey.isBlank()) {
+                                throw IOException("The Maps API key is unavailable.")
+                            }
+                            val route = computeWalkingRoute(
+                                context = context,
+                                apiKey = apiKey,
+                                origin = origin,
+                                destination = selectedDestination
+                            )
+                            routePoints = route.points
+                            routeDistance = formatDistance(route.distanceMeters)
+                            routeDuration = formatDuration(route.durationSeconds)
+                            routeInstructions = route.instructions
+                            routeMessage = if (route.instructions.isEmpty()) {
+                                "Route found, but no turn-by-turn instructions were returned."
+                            } else {
+                                null
+                            }
+                        } catch (error: Exception) {
+                            routeMessage = error.message
+                                ?: "Unable to calculate the walking route. Check your connection and try again."
+                        } finally {
+                            routeLoading = false
+                        }
+                    }
+                }
             },
+            enabled = !routeLoading,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("GET ROUTE")
+            Text(if (routeLoading) "LOADING ROUTE..." else "GET ROUTE")
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = "Walking directions may not always reflect safe or accessible pedestrian paths. " +
+                "Use caution and follow local conditions.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        routeMessage?.let { message ->
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = message,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium
+            )
+        }
+
+        if (routeDistance != null || routeDuration != null) {
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "Walking Route",
+                style = MaterialTheme.typography.titleMedium
+            )
+            routeDistance?.let { Text("Distance: $it") }
+            routeDuration?.let { Text("Estimated duration: $it") }
+        }
+
+        if (routeInstructions.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "Turn-by-turn directions",
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.fillMaxWidth()
+            )
+            routeInstructions.forEachIndexed { index, instruction ->
+                Text(
+                    text = "${index + 1}. $instruction",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp)
+                )
+            }
         }
 
         Spacer(modifier = Modifier.height(20.dp))
@@ -496,3 +657,219 @@ fun NavigationScreen() {
         }
     }
 }
+
+private data class WalkingRoute(
+    val distanceMeters: Int,
+    val durationSeconds: Double,
+    val points: List<LatLng>,
+    val instructions: List<String>
+)
+
+private fun getMapsApiKey(context: Context): String {
+    val applicationInfo = context.packageManager.getApplicationInfo(
+        context.packageName,
+        PackageManager.GET_META_DATA
+    )
+    return applicationInfo.metaData
+        ?.getString("com.google.android.geo.API_KEY")
+        .orEmpty()
+}
+
+private suspend fun computeWalkingRoute(
+    context: Context,
+    apiKey: String,
+    origin: LatLng,
+    destination: LatLng
+): WalkingRoute = withContext(Dispatchers.IO) {
+    val requestBody = JSONObject()
+        .put("origin", routeWaypoint(origin))
+        .put("destination", routeWaypoint(destination))
+        .put("travelMode", "WALK")
+        .put("computeAlternativeRoutes", false)
+        .put("languageCode", Locale.getDefault().toLanguageTag())
+        .put("units", "METRIC")
+
+    val connection = (URL(ROUTES_API_URL).openConnection() as HttpURLConnection).apply {
+        requestMethod = "POST"
+        connectTimeout = 15_000
+        readTimeout = 20_000
+        doOutput = true
+        setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+        setRequestProperty("X-Goog-Api-Key", apiKey)
+        setRequestProperty("X-Goog-FieldMask", ROUTES_FIELD_MASK)
+        setRequestProperty("X-Android-Package", context.packageName)
+        getSigningCertificateSha1(context)?.let {
+            setRequestProperty("X-Android-Cert", it)
+        }
+    }
+
+    try {
+        connection.outputStream.bufferedWriter(Charsets.UTF_8).use {
+            it.write(requestBody.toString())
+        }
+
+        val responseCode = connection.responseCode
+        val responseText = (if (responseCode in 200..299) {
+            connection.inputStream
+        } else {
+            connection.errorStream
+        })?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+
+        if (responseCode !in 200..299) {
+            val apiMessage = runCatching {
+                JSONObject(responseText).getJSONObject("error").getString("message")
+            }.getOrNull()
+            throw IOException(
+                apiMessage ?: "Routes API request failed (HTTP $responseCode)."
+            )
+        }
+
+        parseWalkingRoute(JSONObject(responseText))
+    } finally {
+        connection.disconnect()
+    }
+}
+
+private fun routeWaypoint(location: LatLng): JSONObject = JSONObject()
+    .put(
+        "location",
+        JSONObject().put(
+            "latLng",
+            JSONObject()
+                .put("latitude", location.latitude)
+                .put("longitude", location.longitude)
+        )
+    )
+
+private fun parseWalkingRoute(response: JSONObject): WalkingRoute {
+    val routes = response.optJSONArray("routes")
+    if (routes == null || routes.length() == 0) {
+        throw IOException("No walking route was found for this destination.")
+    }
+
+    val route = routes.getJSONObject(0)
+    val encodedPolyline = route
+        .optJSONObject("polyline")
+        ?.optString("encodedPolyline")
+        .orEmpty()
+    if (encodedPolyline.isBlank()) {
+        throw IOException("The route did not include a drawable path.")
+    }
+
+    val instructions = buildList {
+        val legs = route.optJSONArray("legs") ?: return@buildList
+        for (legIndex in 0 until legs.length()) {
+            val steps = legs.getJSONObject(legIndex).optJSONArray("steps") ?: continue
+            for (stepIndex in 0 until steps.length()) {
+                val instruction = steps.getJSONObject(stepIndex)
+                    .optJSONObject("navigationInstruction")
+                    ?.optString("instructions")
+                    .orEmpty()
+                val stepDistance = steps.getJSONObject(stepIndex).optInt("distanceMeters", -1)
+                if (instruction.isNotBlank()) {
+                    add(
+                        if (stepDistance >= 0) {
+                            "$instruction (${formatDistance(stepDistance)})"
+                        } else {
+                            instruction
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    return WalkingRoute(
+        distanceMeters = route.optInt("distanceMeters", 0),
+        durationSeconds = route.optString("duration")
+            .removeSuffix("s")
+            .toDoubleOrNull()
+            ?: 0.0,
+        points = decodePolyline(encodedPolyline),
+        instructions = instructions
+    )
+}
+
+private fun decodePolyline(encoded: String): List<LatLng> {
+    val points = mutableListOf<LatLng>()
+    var index = 0
+    var latitude = 0
+    var longitude = 0
+
+    while (index < encoded.length) {
+        var result = 0
+        var shift = 0
+        var value: Int
+        do {
+            if (index >= encoded.length) throw IOException("The route path was invalid.")
+            value = encoded[index++].code - 63
+            result = result or ((value and 0x1f) shl shift)
+            shift += 5
+        } while (value >= 0x20)
+        latitude += if ((result and 1) != 0) (result shr 1).inv() else result shr 1
+
+        result = 0
+        shift = 0
+        do {
+            if (index >= encoded.length) throw IOException("The route path was invalid.")
+            value = encoded[index++].code - 63
+            result = result or ((value and 0x1f) shl shift)
+            shift += 5
+        } while (value >= 0x20)
+        longitude += if ((result and 1) != 0) (result shr 1).inv() else result shr 1
+
+        points += LatLng(latitude / 1E5, longitude / 1E5)
+    }
+
+    return points
+}
+
+private fun formatDistance(distanceMeters: Int): String =
+    if (distanceMeters < 1_000) {
+        "$distanceMeters m"
+    } else {
+        String.format(Locale.getDefault(), "%.1f km", distanceMeters / 1_000.0)
+    }
+
+private fun formatDuration(durationSeconds: Double): String {
+    val totalMinutes = ceil(durationSeconds / 60.0).toInt()
+    val hours = totalMinutes / 60
+    val minutes = totalMinutes % 60
+    return when {
+        hours > 0 && minutes > 0 -> "$hours hr $minutes min"
+        hours > 0 -> "$hours hr"
+        else -> "${max(1, minutes)} min"
+    }
+}
+
+private fun getSigningCertificateSha1(context: Context): String? {
+    val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        context.packageManager.getPackageInfo(
+            context.packageName,
+            PackageManager.GET_SIGNING_CERTIFICATES
+        )
+    } else {
+        @Suppress("DEPRECATION")
+        context.packageManager.getPackageInfo(
+            context.packageName,
+            PackageManager.GET_SIGNATURES
+        )
+    }
+
+    val certificate = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        packageInfo.signingInfo?.apkContentsSigners?.firstOrNull()
+    } else {
+        @Suppress("DEPRECATION")
+        packageInfo.signatures?.firstOrNull()
+    } ?: return null
+
+    return MessageDigest.getInstance("SHA-1")
+        .digest(certificate.toByteArray())
+        .joinToString(separator = "") { byte -> "%02X".format(byte.toInt() and 0xff) }
+}
+
+private const val ROUTES_API_URL =
+    "https://routes.googleapis.com/directions/v2:computeRoutes"
+private const val ROUTES_FIELD_MASK =
+    "routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline," +
+        "routes.legs.steps.navigationInstruction,routes.legs.steps.distanceMeters"
