@@ -84,6 +84,18 @@ class ConversationManager(
         elevenLabsClient.release()
     }
 
+    /**
+     * Speaks a short safety alert only when no conversation turn is active.
+     * Pausing wake-word recognition prevents Goose from hearing its own alert.
+     */
+    fun speakObstacleAlert(text: String): Boolean {
+        if (_state.value != ConversationState.LISTENING_FOR_WAKE_WORD || text.isBlank()) return false
+        wakeWordDetector.pause()
+        _state.value = ConversationState.SPEAKING
+        speak(text) { returnToWakeWordListening() }
+        return true
+    }
+
     private fun onWakeWordDetected() {
         Log.d(TAG, "Wake word detected")
         wakeWordDetector.pause()

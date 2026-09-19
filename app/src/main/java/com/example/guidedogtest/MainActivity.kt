@@ -763,7 +763,10 @@ fun NavigationScreen() {
             onDismissRequest = { showOcrMode = false },
             properties = DialogProperties(usePlatformDefaultWidth = false)
         ) {
-            OcrScreen(onClose = { showOcrMode = false })
+            OcrScreen(
+                onClose = { showOcrMode = false },
+                speakObstacleAlert = conversationManager::speakObstacleAlert
+            )
         }
     }
 }

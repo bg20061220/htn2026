@@ -25,14 +25,18 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -53,7 +57,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
 
 @Composable
-fun OcrScreen(onClose: () -> Unit) {
+fun OcrScreen(
+    onClose: () -> Unit,
+    speakObstacleAlert: (String) -> Boolean = { false }
+) {
     val context = LocalContext.current
     var cameraPermissionGranted by remember {
         mutableStateOf(
@@ -89,7 +96,10 @@ fun OcrScreen(onClose: () -> Unit) {
             Spacer(modifier = Modifier.height(12.dp))
 
             if (cameraPermissionGranted) {
-                OcrCameraContent(modifier = Modifier.weight(1f))
+                OcrCameraContent(
+                    speakObstacleAlert = speakObstacleAlert,
+                    modifier = Modifier.weight(1f)
+                )
             } else {
                 Column(
                     modifier = Modifier
@@ -112,12 +122,34 @@ fun OcrScreen(onClose: () -> Unit) {
 }
 
 @Composable
-private fun OcrCameraContent(modifier: Modifier = Modifier) {
+private fun OcrCameraContent(
+    speakObstacleAlert: (String) -> Boolean,
+    modifier: Modifier = Modifier
+) {
     var frameResult by remember { mutableStateOf(OcrFrameResult()) }
     var objectDetections by remember { mutableStateOf<List<VisionObjectDetection>>(emptyList()) }
     var cameraError by remember { mutableStateOf<String?>(null) }
     var useDepthMode by remember { mutableStateOf(true) }
     var depthStatus by remember { mutableStateOf(ArDepthStatus()) }
+    var obstacleAlertsEnabled by remember { mutableStateOf(false) }
+    var warningDistanceMeters by remember { mutableStateOf(2f) }
+    var lastObstacleAlert by remember { mutableStateOf<String?>(null) }
+    val obstacleAlertManager = remember {
+        ObstacleAlertManager(speak = speakObstacleAlert)
+    }
+
+    LaunchedEffect(objectDetections, frameResult.imageWidth, obstacleAlertsEnabled, warningDistanceMeters) {
+        if (obstacleAlertsEnabled) {
+            obstacleAlertManager.consider(
+                detections = objectDetections,
+                frameWidth = frameResult.imageWidth,
+                warningDistanceMeters = warningDistanceMeters
+            )?.let { lastObstacleAlert = it.speech }
+        } else {
+            obstacleAlertManager.reset()
+            lastObstacleAlert = null
+        }
+    }
 
     Column(modifier = modifier.fillMaxWidth()) {
         if (useDepthMode && ArCoreApk.getInstance().checkAvailability(LocalContext.current) == ArCoreApk.Availability.SUPPORTED_INSTALLED) {
@@ -148,6 +180,40 @@ private fun OcrCameraContent(modifier: Modifier = Modifier) {
         )
 
         Spacer(modifier = Modifier.height(12.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Obstacle Voice Alerts", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "Warn within ${String.format(java.util.Locale.US, "%.1f", warningDistanceMeters)} m",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            Switch(
+                checked = obstacleAlertsEnabled,
+                onCheckedChange = { obstacleAlertsEnabled = it }
+            )
+        }
+        Slider(
+            value = warningDistanceMeters,
+            onValueChange = { warningDistanceMeters = it },
+            valueRange = 0.5f..4f,
+            steps = 6,
+            enabled = obstacleAlertsEnabled,
+            modifier = Modifier.fillMaxWidth()
+        )
+        lastObstacleAlert?.let {
+            Text(
+                text = "Last alert: $it",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
 
         Text(
             text = "ARCore session: ${if (depthStatus.sessionActive) "active" else "inactive"} • " +
