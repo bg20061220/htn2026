@@ -33,6 +33,7 @@ import com.example.guidedogtest.maps.formatDuration
 import com.example.guidedogtest.maps.getMapsApiKey
 import com.example.guidedogtest.ui.theme.GuideDogTestTheme
 import com.example.guidedogtest.voice.ConversationManager
+import com.example.guidedogtest.voice.RobotCommand
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.maps.CameraUpdateFactory
@@ -189,9 +190,62 @@ fun NavigationScreen() {
                         lastLocation?.let { LatLng(it.latitude, it.longitude) }
                     },
                     onCommand = { robotCommand ->
-                        // TODO: wire into BLE once the ESP32 link exists —
-                        // same as the FORWARD/LEFT/STOP/RIGHT buttons below.
                         Log.d("MainActivity", "Voice robot command: $robotCommand")
+                        when (robotCommand) {
+                            is RobotCommand.Stop -> {
+                                stopFollowing()
+                                command = "STOP"
+                            }
+                            is RobotCommand.Go -> {
+                                stopFollowing()
+                                command = "FORWARD"
+                            }
+                            is RobotCommand.Turn -> {
+                                stopFollowing()
+                                command = if (robotCommand.direction == "left") "LEFT" else "RIGHT"
+                            }
+                            is RobotCommand.Navigate -> {
+                                val here = lastLocation
+                                val mapsKey = BuildConfig.MAPS_API_KEY
+                                if (here == null) {
+                                    routeStatus = "waiting for a GPS fix"
+                                } else if (mapsKey.isBlank()) {
+                                    routeStatus = "add MAPS_API_KEY to local.properties, then rebuild"
+                                } else {
+                                    routeStatus = "requesting a walking route to \"${robotCommand.destination}\"..."
+                                    scope.launch {
+                                        val result = withContext(Dispatchers.IO) {
+                                            runCatching {
+                                                RoutesApi.fetchRoute(
+                                                    apiKey = mapsKey,
+                                                    origin = GeoPoint(here.latitude, here.longitude),
+                                                    destination = robotCommand.destination,
+                                                )
+                                            }
+                                        }
+                                        result
+                                            .onSuccess { steps ->
+                                                routeSteps = steps
+                                                follower = RouteFollower(steps)
+                                                routeStatus =
+                                                    "${steps.size} steps, ${steps.sumOf { it.distanceMeters }} m"
+                                                // Voice-confirmed navigation drives immediately,
+                                                // unlike the manual GET ROUTE + START FOLLOWING
+                                                // buttons — the user already said yes.
+                                                command = "STOP"
+                                                autonomousFrame = Drive.STOP_FRAME
+                                                following = true
+                                            }
+                                            .onFailure { error ->
+                                                routeSteps = emptyList()
+                                                follower = null
+                                                routeStatus = error.message ?: "voice route request failed"
+                                            }
+                                    }
+                                }
+                            }
+                            RobotCommand.None -> {}
+                        }
                     }
                 )
             }
