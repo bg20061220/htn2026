@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- USB serial bridges the ESP32 may present. Matching here lets Android offer the app when
+     the cable is plugged in, and lets it remember the granted permission. -->
+<resources>
+    <!-- 0x10C4 / 0xEA60: Silicon Labs CP210x (most ESP32 dev boards) -->
+    <usb-device vendor-id="4292" product-id="60000" />
+
+    <!-- 0x1A86 / 0x7523: QinHeng CH340, 0x1A86 / 0x55D4: CH9102, 0x1A86 / 0x55D3: CH343
+         (the Freenove ESP32-S3 UART socket uses a CH343) -->
+    <usb-device vendor-id="6790" product-id="29987" />
+    <usb-device vendor-id="6790" product-id="21972" />
+    <usb-device vendor-id="6790" product-id="21971" />
+
+    <!-- 0x0403 / FTDI FT232R and FT231X -->
+    <usb-device vendor-id="1027" product-id="24577" />
+    <usb-device vendor-id="1027" product-id="24597" />
+
+    <!-- 0x303A: Espressif native USB (ESP32-S3/C3 running the built-in CDC) -->
+    <usb-device vendor-id="12346" />
+
+    <!-- 0x2341: Arduino-class boards -->
+    <usb-device vendor-id="9025" />
+</resources>

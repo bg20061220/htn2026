@@ -1,7 +1,18 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
 }
+
+// Secrets live in local.properties (gitignored) and are injected into BuildConfig at build time.
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) file.inputStream().use { load(it) }
+}
+
+fun secret(name: String, fallback: String = ""): String =
+    localProperties.getProperty(name, fallback)
 
 android {
     namespace = "com.example.guidedogtest"
@@ -17,6 +28,11 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        buildConfigField("String", "MAPS_API_KEY", "\"${secret("MAPS_API_KEY")}\"")
+
+        // The Maps SDK reads its key from the manifest rather than from BuildConfig.
+        manifestPlaceholders["mapsApiKey"] = secret("MAPS_API_KEY")
     }
 
     buildTypes {
@@ -32,6 +48,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
@@ -52,5 +69,7 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
     implementation("com.google.android.gms:play-services-location:21.4.0")
+    implementation("com.google.android.gms:play-services-maps:20.0.0")
     implementation("com.google.ar:core:1.33.0")
+    implementation("com.github.mik3y:usb-serial-for-android:3.8.1")
 }
