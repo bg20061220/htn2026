@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -20,7 +21,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import com.example.guidedogtest.ui.theme.GuideDogTestTheme
+import com.example.guidedogtest.voice.ConversationManager
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.maps.CameraUpdateFactory
@@ -105,6 +110,55 @@ fun NavigationScreen() {
 
     var arCoreStatus by remember { mutableStateOf("Not checked") }
     var depthStatus by remember { mutableStateOf("Not checked") }
+
+    var micPermissionGranted by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+
+    // MIC PERMISSION
+    val micPermissionLauncher =
+        rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { granted ->
+            micPermissionGranted = granted
+        }
+
+    val conversationManager: ConversationManager = viewModel(
+        factory = viewModelFactory {
+            initializer {
+                ConversationManager(
+                    context = context.applicationContext,
+                    groqApiKey = BuildConfig.GROQ_API_KEY,
+                    elevenLabsApiKey = BuildConfig.ELEVENLABS_API_KEY,
+                    onCommand = { robotCommand ->
+                        // TODO: wire into BLE once the ESP32 link exists —
+                        // same as the FORWARD/LEFT/STOP/RIGHT buttons below.
+                        Log.d("MainActivity", "Voice robot command: $robotCommand")
+                    }
+                )
+            }
+        }
+    )
+
+    val conversationState by conversationManager.state.collectAsState()
+    val lastSpoken by conversationManager.lastSpoken.collectAsState()
+
+    LaunchedEffect(micPermissionGranted) {
+        if (micPermissionGranted) {
+            conversationManager.start()
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            conversationManager.stop()
+        }
+    }
 
     val currentLocation = remember(latitude, longitude) {
         val lat = latitude.toDoubleOrNull()
@@ -263,6 +317,27 @@ fun NavigationScreen() {
             text = "MyPetGoose",
             style = MaterialTheme.typography.headlineLarge
         )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Text(
+            text = "Voice Assistant",
+            style = MaterialTheme.typography.titleMedium
+        )
+
+        if (micPermissionGranted) {
+            Text("State: $conversationState")
+            Text("Last spoken: $lastSpoken")
+        } else {
+            Text("Mic permission not granted")
+            Button(
+                onClick = {
+                    micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            ) {
+                Text("ENABLE VOICE ASSISTANT")
+            }
+        }
 
         Spacer(modifier = Modifier.height(16.dp))
 
