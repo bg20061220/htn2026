@@ -1,0 +1,10 @@
+# Local Arduino CLI setup for flashing the OpenBot firmware.
+# The toolchain lives in .tools/ so that nothing is installed system-wide.
+# arduino-cli picks this file up automatically when it is started in this directory.
+directories:
+  data: C:/Users/aravm/Documents/htn2026/.tools/arduino15
+  downloads: C:/Users/aravm/Documents/htn2026/.tools/downloads
+  user: C:/Users/aravm/Documents/htn2026/.tools/user
+board_manager:
+  additional_urls:
+    - https://espressif.github.io/arduino-esp32/package_esp32_index.json

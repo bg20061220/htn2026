@@ -7,12 +7,17 @@ plugins {
     alias(libs.plugins.secrets.gradle.plugin)
 }
 
+// Secrets live in local.properties (gitignored) and are injected into BuildConfig at build
+// time; the secrets-gradle-plugin handles the manifest's ${MAPS_API_KEY} placeholder itself.
 val localProperties = Properties().apply {
     val localFile = rootProject.file("local.properties")
     if (localFile.exists()) {
-        load(FileInputStream(localFile))
+        FileInputStream(localFile).use { load(it) }
     }
 }
+
+fun secret(name: String, fallback: String = ""): String =
+    localProperties.getProperty(name, fallback)
 
 android {
     namespace = "com.example.guidedogtest"
@@ -29,14 +34,9 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        buildConfigField(
-            "String", "GROQ_API_KEY",
-            "\"${localProperties.getProperty("GROQ_API_KEY", "")}\""
-        )
-        buildConfigField(
-            "String", "ELEVENLABS_API_KEY",
-            "\"${localProperties.getProperty("ELEVENLABS_API_KEY", "")}\""
-        )
+        buildConfigField("String", "GROQ_API_KEY", "\"${secret("GROQ_API_KEY")}\"")
+        buildConfigField("String", "ELEVENLABS_API_KEY", "\"${secret("ELEVENLABS_API_KEY")}\"")
+        buildConfigField("String", "MAPS_API_KEY", "\"${secret("MAPS_API_KEY")}\"")
     }
 
     buildTypes {
@@ -75,8 +75,10 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
     implementation("com.google.android.gms:play-services-location:21.4.0")
+    implementation("com.google.android.gms:play-services-maps:20.0.0")
     implementation("com.google.ar:core:1.33.0")
     implementation("com.squareup.okhttp3:okhttp:5.5.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0")
+    implementation("com.github.mik3y:usb-serial-for-android:3.8.1")
 }

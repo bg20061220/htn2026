@@ -2,7 +2,9 @@ package com.example.guidedogtest
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.location.Location
 import android.os.Bundle
+import android.os.Looper
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -14,8 +16,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -44,15 +49,21 @@ import com.google.android.libraries.places.api.net.FetchPlaceRequest
 import com.google.android.libraries.places.api.net.FindAutocompletePredictionsRequest
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
 import com.google.ar.core.Session
 import com.google.maps.android.compose.GoogleMap
 import com.google.maps.android.compose.Marker
 import com.google.maps.android.compose.Polyline
 import com.google.maps.android.compose.rememberCameraPositionState
 import com.google.maps.android.compose.rememberUpdatedMarkerState
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.IOException
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
@@ -68,8 +79,16 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            GuideDogTestTheme {
-                NavigationScreen()
+            // The window theme is light, so the colour scheme must be too: with the phone in dark
+            // mode the dynamic dark scheme made everything scheme-coloured come out light on white -
+            // the destination field's text was white on white and looked empty.
+            GuideDogTestTheme(darkTheme = false) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background,
+                ) {
+                    NavigationScreen()
+                }
             }
         }
     }
@@ -85,7 +104,9 @@ fun NavigationScreen() {
         remember { LocationServices.getFusedLocationProviderClient(context) }
     val placesClient = remember { Places.createClient(context) }
 
-    var destination by remember { mutableStateOf("") }
+    // Saved, so a typed destination survives the screen being reclaimed - and rotation, which the
+    // manifest now keeps the activity alive through.
+    var destination by rememberSaveable { mutableStateOf("") }
     var destinationName by remember { mutableStateOf<String?>(null) }
     var destinationLocation by remember { mutableStateOf<LatLng?>(null) }
     var placeSuggestions by remember { mutableStateOf<List<AutocompletePrediction>>(emptyList()) }
@@ -99,8 +120,43 @@ fun NavigationScreen() {
     var routeLoading by remember { mutableStateOf(false) }
     var command by remember { mutableStateOf("STOP") }
 
-    var latitude by remember { mutableStateOf("Unknown") }
-    var longitude by remember { mutableStateOf("Unknown") }
+    // Live position, so the follower never works from a stale fix.
+    var lastLocation by remember { mutableStateOf<Location?>(null) }
+
+    // Which screen is up. The map is a view of the same session, not a second session.
+    var screen by remember { mutableStateOf(Screen.Controls) }
+
+    // The phone's compass: the follower aligns to this, because GPS course says nothing at rest.
+    val headingSource = remember { HeadingSource(context) }
+
+    // The manual drive values, edited on the Configure Robot page and kept across launches.
+    var motorSettings by remember { mutableStateOf(MotorSettingsStore.load(context)) }
+
+    // Route state.
+    var routeSteps by remember { mutableStateOf<List<RouteStep>>(emptyList()) }
+    var routeStatus by remember { mutableStateOf("no route loaded") }
+    var follower by remember { mutableStateOf<RouteFollower?>(null) }
+    var following by remember { mutableStateOf(false) }
+
+    // When this is set it wins over the manual command: that is what makes the robot autonomous.
+    var autonomousFrame by remember { mutableStateOf<String?>(null) }
+
+    val scope = rememberCoroutineScope()
+
+    val scrollState = rememberScrollState()
+
+    /** True while the destination field has the keyboard, so a resize can bring it back into view. */
+    var destinationFocused by remember { mutableStateOf(false) }
+
+    /** Brings the destination field and the buttons under it above the keyboard. */
+    fun revealBottom() {
+        scope.launch { scrollState.scrollTo(scrollState.maxValue) }
+    }
+
+    fun stopFollowing() {
+        following = false
+        autonomousFrame = null
+    }
 
     var arCoreStatus by remember { mutableStateOf("Not checked") }
     var depthStatus by remember { mutableStateOf("Not checked") }
@@ -130,9 +186,7 @@ fun NavigationScreen() {
                     groqApiKey = BuildConfig.GROQ_API_KEY,
                     elevenLabsApiKey = BuildConfig.ELEVENLABS_API_KEY,
                     locationProvider = {
-                        val lat = latitude.toDoubleOrNull()
-                        val lng = longitude.toDoubleOrNull()
-                        if (lat != null && lng != null) LatLng(lat, lng) else null
+                        lastLocation?.let { LatLng(it.latitude, it.longitude) }
                     },
                     onCommand = { robotCommand ->
                         // TODO: wire into BLE once the ESP32 link exists —
@@ -176,14 +230,8 @@ fun NavigationScreen() {
         }
     }
 
-    val currentLocation = remember(latitude, longitude) {
-        val lat = latitude.toDoubleOrNull()
-        val lng = longitude.toDoubleOrNull()
-        if (lat != null && lng != null && lat in -90.0..90.0 && lng in -180.0..180.0) {
-            LatLng(lat, lng)
-        } else {
-            null
-        }
+    val currentLocation = remember(lastLocation) {
+        lastLocation?.let { LatLng(it.latitude, it.longitude) }
     }
     val fallbackLocation = remember { LatLng(0.0, 0.0) }
     val cameraPositionState = rememberCameraPositionState {
@@ -296,8 +344,7 @@ fun NavigationScreen() {
                     ).addOnSuccessListener { location ->
 
                         if (location != null) {
-                            latitude = location.latitude.toString()
-                            longitude = location.longitude.toString()
+                            lastLocation = location
                         }
                     }
                 }
@@ -319,10 +366,212 @@ fun NavigationScreen() {
             }
         }
 
+    val link = remember { RobotLink(context) }
+
+    val bluetoothPermissionLauncher =
+        rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestMultiplePermissions()
+        ) { granted ->
+
+            if (granted.values.all { it }) {
+                link.connect()
+            }
+        }
+
+    /**
+     * Opens the link: USB when the board is attached to the phone (Android handles that permission
+     * itself), otherwise BLE, asking for the permissions that needs.
+     */
+    fun connectRobot() {
+        if (link.usbAttached()) {
+            link.connect()
+            return
+        }
+
+        val missing = RobotLink.requiredPermissions().filter {
+            ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+        }
+
+        if (missing.isEmpty()) {
+            link.connect()
+        } else {
+            bluetoothPermissionLauncher.launch(missing.toTypedArray())
+        }
+    }
+
+    // Keeps the ESP32 fed: the frame currently in force at 20 Hz, plus the heartbeat the
+    // firmware needs to keep the motors turning. If this loop stops - app killed, link
+    // dropped, screen closed - the firmware stops the car on its own after 500 ms.
+    //
+    // The frame is whatever is in force: the route follower's when it is driving, otherwise the
+    // manual command. One writer, one path to the motors.
+    LaunchedEffect(link.connected) {
+
+        var tick = 0
+
+        while (link.connected) {
+
+            link.send(autonomousFrame ?: motorSettings.speedsFor(command).frame())
+
+            if (tick % 4 == 0) {
+                link.send("h500\n")
+            }
+
+            tick++
+            delay(50)
+        }
+    }
+
+    // A live fix while the screen is up (1 Hz, faster if the receiver has one ready).
+    val locationCallback = remember {
+        object : LocationCallback() {
+            override fun onLocationResult(result: LocationResult) {
+                result.lastLocation?.let {
+                    lastLocation = it
+                    // Magnetic north is not true north; the compass needs a fix to correct itself.
+                    headingSource.setLocation(it.latitude, it.longitude)
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            val request =
+                LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L)
+                    .setMinUpdateIntervalMillis(500L)
+                    .build()
+            fusedLocationClient.requestLocationUpdates(
+                request,
+                locationCallback,
+                Looper.getMainLooper()
+            )
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { fusedLocationClient.removeLocationUpdates(locationCallback) }
+    }
+
+    // The compass runs while the screen is up: the follower needs it every tick it is driving.
+    DisposableEffect(Unit) {
+        headingSource.start()
+        onDispose { headingSource.stop() }
+    }
+
+    // The autonomous loop: one decision per tick, handed to the transmit loop above.
+    LaunchedEffect(following, link.connected) {
+
+        val active = follower
+        if (!following || !link.connected || active == null) {
+            autonomousFrame = null
+            return@LaunchedEffect
+        }
+
+        while (following && link.connected) {
+
+            val location = lastLocation
+
+            if (location == null) {
+                autonomousFrame = Drive.STOP_FRAME
+                routeStatus = "waiting for a GPS fix"
+            } else {
+                val fix =
+                    Fix(
+                        lat = location.latitude,
+                        lng = location.longitude,
+                        accuracyMeters = location.accuracy,
+                        // The compass knows which way the car points even standing still, which is
+                        // the whole point of turning in place; the GPS course is the fallback.
+                        headingDegrees = headingSource.headingDegrees ?: gpsCourse(location),
+                    )
+
+                when (val decision = active.update(fix, FOLLOW_TICK_MS / 1000.0)) {
+
+                    is Command.Pivot -> {
+                        // Closed loop, so the frame is re-sent every tick until the error closes.
+                        autonomousFrame = Drive.frame(decision.left, decision.right)
+                        routeStatus =
+                            "turning ${if (decision.degrees < 0) "left" else "right"} " +
+                                "${abs(decision.degrees).toInt()}°"
+                    }
+
+                    is Command.Drive -> {
+                        autonomousFrame = Drive.frame(decision.left, decision.right)
+                        routeStatus =
+                            "${active.progressLabel()}: ${active.currentStep?.instruction ?: ""}"
+                    }
+
+                    is Command.Hold -> {
+                        autonomousFrame = Drive.STOP_FRAME
+                        routeStatus = decision.reason
+                    }
+
+                    Command.Arrived -> {
+                        autonomousFrame = Drive.STOP_FRAME
+                        routeStatus = "arrived"
+                        following = false
+                    }
+                }
+            }
+
+            delay(FOLLOW_TICK_MS)
+        }
+
+        autonomousFrame = Drive.STOP_FRAME
+    }
+
+    // Leaving the screen must never leave the car rolling.
+    DisposableEffect(Unit) {
+        onDispose { link.stopAndDisconnect() }
+    }
+
+    if (screen == Screen.ConfigureRobot) {
+        ConfigureRobotScreen(
+            settings = motorSettings,
+            onSettingsChange = {
+                motorSettings = it
+                MotorSettingsStore.save(context, it)
+            },
+            command = command,
+            onCommand = {
+                stopFollowing()
+                command = it
+            },
+            connected = link.connected,
+            linkStatus = link.status,
+            onConnect = { connectRobot() },
+            onBack = { screen = Screen.Controls },
+        )
+        return
+    }
+
+    if (screen == Screen.LiveMap) {
+        LiveLocationScreen(
+            location = lastLocation,
+            headingDegrees = headingSource.headingDegrees,
+            onRequestPermission = {
+                locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+            },
+            onBack = { screen = Screen.Controls },
+        )
+        return
+    }
+
+    // Scrollable: the route status and the manual buttons below it overflow an S21 screen once a
+    // route is loaded, and a STOP that cannot be reached is worse than useless. The size callback is
+    // what lifts the destination field above the keyboard: the window shrinks when the keyboard
+    // opens, and that resize is the reliable moment to scroll, not the focus event.
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(scrollState)
+            .onSizeChanged { if (destinationFocused) revealBottom() }
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -359,6 +608,19 @@ fun NavigationScreen() {
 
         Text("ARCore: $arCoreStatus")
         Text("Depth API: $depthStatus")
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Text("ESP32: ${link.status}")
+        Text("Robot: ${link.telemetry}")
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Button(
+            onClick = { connectRobot() }
+        ) {
+            Text("CONNECT ROBOT")
+        }
 
         Spacer(modifier = Modifier.height(12.dp))
 
@@ -429,10 +691,20 @@ fun NavigationScreen() {
             style = MaterialTheme.typography.titleMedium
         )
 
-        Text("Latitude: $latitude")
-        Text("Longitude: $longitude")
+        Text("Latitude: ${lastLocation?.latitude ?: "unknown"}")
+        Text("Longitude: ${lastLocation?.longitude ?: "unknown"}")
+        Text("Heading: ${headingText(headingSource.headingDegrees)}")
 
         Spacer(modifier = Modifier.height(12.dp))
+
+        Button(
+            onClick = { screen = Screen.LiveMap },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("LIVE MAP")
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
 
         Button(
             onClick = {
@@ -450,8 +722,7 @@ fun NavigationScreen() {
                     ).addOnSuccessListener { location ->
 
                         if (location != null) {
-                            latitude = location.latitude.toString()
-                            longitude = location.longitude.toString()
+                            lastLocation = location
                         }
                     }
 
@@ -531,7 +802,12 @@ fun NavigationScreen() {
                 unfocusedBorderColor = MaterialTheme.colorScheme.outline,
                 disabledBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.38f)
             ),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .onFocusChanged { focus ->
+                    destinationFocused = focus.isFocused
+                    if (focus.isFocused) revealBottom()
+                },
         )
 
         placeSuggestions.forEach { prediction ->
@@ -607,48 +883,87 @@ fun NavigationScreen() {
             onClick = {
                 val origin = currentLocation
                 val selectedDestination = destinationLocation
-                when {
-                    origin == null -> {
-                        routeMessage = "Current GPS location is unavailable. Tap GET CURRENT LOCATION first."
-                    }
-                    selectedDestination == null -> {
-                        routeMessage = "Select a destination from the place suggestions first."
-                    }
-                    else -> coroutineScope.launch {
-                        routeLoading = true
-                        routeMessage = null
-                        routePoints = emptyList()
-                        routeDistance = null
-                        routeDuration = null
-                        routeInstructions = emptyList()
 
-                        try {
-                            val apiKey = getMapsApiKey(context)
-                            if (apiKey.isBlank()) {
-                                throw IOException("The Maps API key is unavailable.")
-                            }
-                            val route = computeWalkingRoute(
-                                context = context,
-                                apiKey = apiKey,
-                                origin = origin,
-                                destination = selectedDestination
+                if (origin == null) {
+                    routeMessage = "Current GPS location is unavailable. Tap GET CURRENT LOCATION first."
+                    return@Button
+                }
+                if (selectedDestination == null) {
+                    routeMessage = "Select a destination from the place suggestions first."
+                    return@Button
+                }
+
+                routeLoading = true
+                routeMessage = null
+                routePoints = emptyList()
+                routeDistance = null
+                routeDuration = null
+                routeInstructions = emptyList()
+
+                // Fetches the display route (for the map/polyline below) and the
+                // follower's route (for autonomous driving via START FOLLOWING)
+                // separately, since they're built from two different Routes API
+                // clients with two different coordinate types.
+                coroutineScope.launch {
+                    try {
+                        val apiKey = getMapsApiKey(context)
+                        if (apiKey.isBlank()) {
+                            throw IOException("The Maps API key is unavailable.")
+                        }
+                        val route = computeWalkingRoute(
+                            context = context,
+                            apiKey = apiKey,
+                            origin = origin,
+                            destination = selectedDestination
+                        )
+                        routePoints = route.points
+                        routeDistance = formatDistance(route.distanceMeters)
+                        routeDuration = formatDuration(route.durationSeconds)
+                        routeInstructions = route.instructions
+                        routeMessage = if (route.instructions.isEmpty()) {
+                            "Route found, but no turn-by-turn instructions were returned."
+                        } else {
+                            null
+                        }
+                    } catch (error: Exception) {
+                        routeMessage = error.message
+                            ?: "Unable to calculate the walking route. Check your connection and try again."
+                    } finally {
+                        routeLoading = false
+                    }
+                }
+
+                val mapsKey = BuildConfig.MAPS_API_KEY
+                if (mapsKey.isBlank()) {
+                    routeStatus = "add MAPS_API_KEY to local.properties, then rebuild"
+                    return@Button
+                }
+
+                routeStatus = "requesting a walking route to \"$destination\"..."
+
+                scope.launch {
+                    val result = withContext(Dispatchers.IO) {
+                        runCatching {
+                            RoutesApi.fetchRoute(
+                                apiKey = mapsKey,
+                                origin = GeoPoint(origin.latitude, origin.longitude),
+                                destination = destination,
                             )
-                            routePoints = route.points
-                            routeDistance = formatDistance(route.distanceMeters)
-                            routeDuration = formatDuration(route.durationSeconds)
-                            routeInstructions = route.instructions
-                            routeMessage = if (route.instructions.isEmpty()) {
-                                "Route found, but no turn-by-turn instructions were returned."
-                            } else {
-                                null
-                            }
-                        } catch (error: Exception) {
-                            routeMessage = error.message
-                                ?: "Unable to calculate the walking route. Check your connection and try again."
-                        } finally {
-                            routeLoading = false
                         }
                     }
+
+                    result
+                        .onSuccess { steps ->
+                            routeSteps = steps
+                            follower = RouteFollower(steps)
+                            routeStatus =
+                                "${steps.size} steps, ${steps.sumOf { it.distanceMeters }} m"
+                        }
+                        .onFailure { error ->
+                            routeSteps = emptyList()
+                            follower = null
+                            routeStatus = error.message ?: "route request failed"
+                        }
                 }
             },
             enabled = !routeLoading,
@@ -702,50 +1017,69 @@ fun NavigationScreen() {
             }
         }
 
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text("Route: $routeStatus")
+
+        follower?.currentStep?.let { step ->
+            Text("Now: ${step.instruction} (${step.distanceMeters} m)")
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Button(
+            onClick = {
+
+                if (following) {
+                    stopFollowing()
+                    command = "STOP"
+                    routeStatus = "stopped"
+                    return@Button
+                }
+
+                if (follower == null) {
+                    routeStatus = "get a route first"
+                    return@Button
+                }
+
+                if (!link.connected) {
+                    routeStatus = "connect the robot first"
+                    return@Button
+                }
+
+                // Hand the motors over to the follower; the manual command goes neutral.
+                command = "STOP"
+                autonomousFrame = Drive.STOP_FRAME
+                following = true
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(if (following) "STOP FOLLOWING" else "START FOLLOWING")
+        }
+
         Spacer(modifier = Modifier.height(20.dp))
 
         Text("Robot Command: $command")
 
         Spacer(modifier = Modifier.height(16.dp))
 
+        // The manual drive buttons and their wheel values live on their own page: they are the
+        // floor-testing rig, not part of the demo flow.
         Button(
-            onClick = {
-                command = "FORWARD"
-            }
+            onClick = { screen = Screen.ConfigureRobot },
+            modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("FORWARD")
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-
-            Button(
-                onClick = {
-                    command = "LEFT"
-                }
-            ) {
-                Text("LEFT")
-            }
-
-            Button(
-                onClick = {
-                    command = "STOP"
-                }
-            ) {
-                Text("STOP")
-            }
-
-            Button(
-                onClick = {
-                    command = "RIGHT"
-                }
-            ) {
-                Text("RIGHT")
-            }
+            Text("CONFIGURE ROBOT")
         }
     }
 }
 
+/** One decision per tick for the route follower. */
+private const val FOLLOW_TICK_MS = 100L
+
+/** The screens: the controls, the live map, and the manual drive tuning page. */
+private enum class Screen { Controls, LiveMap, ConfigureRobot }
+
+/** GPS course over ground, only trustworthy while actually moving - standing still it is noise. */
+private fun gpsCourse(location: Location): Double? =
+    if (location.hasBearing() && location.speed > 0.3f) location.bearing.toDouble() else null
