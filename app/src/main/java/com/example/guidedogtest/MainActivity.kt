@@ -18,7 +18,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import com.example.guidedogtest.ocr.OcrScreen
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
@@ -98,6 +101,7 @@ fun NavigationScreen() {
     var routeMessage by remember { mutableStateOf<String?>(null) }
     var routeLoading by remember { mutableStateOf(false) }
     var command by remember { mutableStateOf("STOP") }
+    var showOcrMode by remember { mutableStateOf(false) }
 
     var latitude by remember { mutableStateOf("Unknown") }
     var longitude by remember { mutableStateOf("Unknown") }
@@ -420,6 +424,12 @@ fun NavigationScreen() {
             }
         ) {
             Text("CHECK ARCORE")
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Button(onClick = { showOcrMode = true }) {
+            Text("OPEN OCR CAMERA")
         }
 
         Spacer(modifier = Modifier.height(24.dp))
@@ -745,6 +755,15 @@ fun NavigationScreen() {
             ) {
                 Text("RIGHT")
             }
+        }
+    }
+
+    if (showOcrMode) {
+        Dialog(
+            onDismissRequest = { showOcrMode = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            OcrScreen(onClose = { showOcrMode = false })
         }
     }
 }
