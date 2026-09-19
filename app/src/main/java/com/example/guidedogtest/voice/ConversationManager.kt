@@ -4,6 +4,15 @@ import android.content.Context
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.guidedogtest.maps.ResolvedPlace
+import com.example.guidedogtest.maps.computeWalkingRoute
+import com.example.guidedogtest.maps.formatDistance
+import com.example.guidedogtest.maps.formatDuration
+import com.example.guidedogtest.maps.getMapsApiKey
+import com.example.guidedogtest.maps.resolveBestPlace
+import com.google.android.gms.maps.model.LatLng
+import com.google.android.libraries.places.api.Places
+import com.google.android.libraries.places.api.net.PlacesClient
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -16,13 +25,28 @@ private const val TAG = "ConversationManager"
 // follow-up before giving up and going back to wake-word listening.
 private const val FOLLOW_UP_LISTEN_TIMEOUT_MS = 10000L
 
+private val CONFIRM_WORDS = listOf("yes", "yeah", "yep", "yup", "correct", "right", "sure", "please", "confirm")
+private val DENY_WORDS = listOf("no", "nope", "not", "wrong", "cancel", "nevermind", "never mind")
+
+data class VoiceRoute(
+    val destinationName: String,
+    val destinationLocation: LatLng,
+    val distanceMeters: Int,
+    val durationSeconds: Double,
+    val points: List<LatLng>,
+    val instructions: List<String>
+)
+
 class ConversationManager(
     context: Context,
     groqApiKey: String,
     elevenLabsApiKey: String,
     private val sensorProvider: () -> SensorSnapshot = { SensorSnapshot() },
+    private val locationProvider: () -> LatLng? = { null },
     private val onCommand: (RobotCommand) -> Unit = {}
 ) : ViewModel() {
+
+    private val appContext = context.applicationContext
 
     private val _state = MutableStateFlow(ConversationState.LISTENING_FOR_WAKE_WORD)
     val state: StateFlow<ConversationState> = _state
@@ -30,14 +54,23 @@ class ConversationManager(
     private val _lastSpoken = MutableStateFlow("")
     val lastSpoken: StateFlow<String> = _lastSpoken
 
+    private val _voiceRoute = MutableStateFlow<VoiceRoute?>(null)
+    val voiceRoute: StateFlow<VoiceRoute?> = _voiceRoute
+
     private val groqClient = GroqClient(groqApiKey)
     private val elevenLabsClient = ElevenLabsClient(elevenLabsApiKey, context)
     private val speechCapture = SpeechCapture(context)
+    private val placesClient: PlacesClient = Places.createClient(appContext)
     private val history = mutableListOf<ChatTurn>()
 
     private val wakeWordDetector = WakeWordDetector(context) { onWakeWordDetected() }
 
     private var followUpTimeoutJob: Job? = null
+
+    // Set while waiting for the user to say yes/no to a proposed
+    // destination. Non-null means the next transcript is treated as a
+    // confirmation answer instead of a fresh request.
+    private var pendingDestination: ResolvedPlace? = null
 
     fun start() {
         _state.value = ConversationState.LISTENING_FOR_WAKE_WORD
@@ -96,6 +129,14 @@ class ConversationManager(
 
     private fun onTranscript(transcript: String) {
         Log.d(TAG, "Transcript: $transcript")
+
+        val pending = pendingDestination
+        if (pending != null) {
+            pendingDestination = null
+            viewModelScope.launch { handleNavigationConfirmation(pending, transcript) }
+            return
+        }
+
         // Local safety-phrase bypass: these must work with zero network
         // dependency, so we short-circuit before ever calling Groq.
         val safetyCommand = when (transcript.trim().lowercase()) {
@@ -121,15 +162,90 @@ class ConversationManager(
             history.add(ChatTurn("assistant", reply.speech))
             while (history.size > 16) history.removeAt(0)
 
-            // TODO: wire this into BLE once the ESP32 link exists — for now
-            // just log it, same as the FORWARD/LEFT/STOP/RIGHT buttons.
-            if (reply.command !is RobotCommand.None) {
-                Log.d(TAG, "Robot command: ${reply.command}")
-                onCommand(reply.command)
+            val command = reply.command
+            if (command is RobotCommand.Navigate) {
+                handleNavigateRequest(command.destination)
+            } else {
+                // TODO: wire this into BLE once the ESP32 link exists — for
+                // now just log it, same as the FORWARD/LEFT/STOP/RIGHT buttons.
+                if (command !is RobotCommand.None) {
+                    Log.d(TAG, "Robot command: $command")
+                    onCommand(command)
+                }
+                _state.value = ConversationState.SPEAKING
+                speak(reply.speech) { listenForCommand(withTimeout = true) }
             }
+        }
+    }
 
+    /** Resolves the spoken destination to a real place, then asks for confirmation. */
+    private suspend fun handleNavigateRequest(query: String) {
+        val origin = locationProvider()
+        val place = resolveBestPlace(placesClient, query, origin)
+
+        if (place == null) {
             _state.value = ConversationState.SPEAKING
-            speak(reply.speech) { listenForCommand(withTimeout = true) }
+            speak("I couldn't find $query. Where would you like to go?") { listenForCommand(withTimeout = true) }
+            return
+        }
+
+        pendingDestination = place
+        _state.value = ConversationState.SPEAKING
+        val addressPart = if (place.address.isNotBlank()) ", at ${place.address}" else ""
+        speak("Did you mean ${place.name}$addressPart? Say yes or no.") { listenForCommand(withTimeout = true) }
+    }
+
+    /** Handles a yes/no answer to a previously proposed destination. */
+    private suspend fun handleNavigationConfirmation(place: ResolvedPlace, transcript: String) {
+        val answer = transcript.trim().lowercase()
+        val confirmed = CONFIRM_WORDS.any { answer.contains(it) }
+        val denied = DENY_WORDS.any { answer.contains(it) }
+
+        when {
+            confirmed -> {
+                val origin = locationProvider()
+                if (origin == null) {
+                    _state.value = ConversationState.SPEAKING
+                    speak("I don't have a location fix yet, so I can't build a route.") {
+                        listenForCommand(withTimeout = true)
+                    }
+                    return
+                }
+
+                _state.value = ConversationState.THINKING
+                try {
+                    val apiKey = getMapsApiKey(appContext)
+                    val route = computeWalkingRoute(appContext, apiKey, origin, place.location)
+                    _voiceRoute.value = VoiceRoute(
+                        destinationName = place.name,
+                        destinationLocation = place.location,
+                        distanceMeters = route.distanceMeters,
+                        durationSeconds = route.durationSeconds,
+                        points = route.points,
+                        instructions = route.instructions
+                    )
+                    onCommand(RobotCommand.Navigate(place.name))
+                    _state.value = ConversationState.SPEAKING
+                    speak(
+                        "Okay, heading to ${place.name}. That's about ${formatDistance(route.distanceMeters)}, " +
+                            "roughly ${formatDuration(route.durationSeconds)} on foot."
+                    ) { listenForCommand(withTimeout = true) }
+                } catch (e: Exception) {
+                    Log.d(TAG, "Route computation failed: ${e.message}")
+                    _state.value = ConversationState.SPEAKING
+                    speak("Sorry, I couldn't calculate the route.") { listenForCommand(withTimeout = true) }
+                }
+            }
+            denied -> {
+                _state.value = ConversationState.SPEAKING
+                speak("Okay, cancelled. Where would you like to go?") { listenForCommand(withTimeout = true) }
+            }
+            else -> {
+                // Unclear answer — keep waiting on the same destination.
+                pendingDestination = place
+                _state.value = ConversationState.SPEAKING
+                speak("Sorry, was that a yes or a no?") { listenForCommand(withTimeout = true) }
+            }
         }
     }
 

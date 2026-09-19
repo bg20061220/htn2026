@@ -20,6 +20,13 @@ or software. Reference nearby hazards naturally when they are relevant (e.g. "th
 a curb coming up on your left") based on the sensor_state you are given, but keep it
 conversational, not robotic.
 
+If the user asks you to go, walk, navigate, or take them somewhere, set command to
+"navigate" and destination to exactly the place they named (e.g. "the library", "tim
+hortons"), with no filler words added. Do this even if the place sounds far away or
+unclear — let the app resolve and route it; you are not responsible for judging
+distance or feasibility. Your "speech" for a navigate command will not be spoken
+(the app replaces it with its own confirmation prompt), so it can be brief.
+
 Respond with ONLY a JSON object, no other text, in exactly this shape:
 {"speech": "<1-2 short sentences to speak aloud>", "command": "none|stop|go|turn_left|turn_right|navigate", "destination": "<only present if command is navigate>"}
 """
