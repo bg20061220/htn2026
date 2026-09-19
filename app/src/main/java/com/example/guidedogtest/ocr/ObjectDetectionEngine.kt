@@ -12,7 +12,8 @@ import java.io.Closeable
 data class VisionObjectDetection(
     val label: String,
     val confidence: Float,
-    val boundingBox: RectF
+    val boundingBox: RectF,
+    val distanceMeters: Float? = null
 )
 
 class ObjectDetectionEngine(context: Context) : Closeable {

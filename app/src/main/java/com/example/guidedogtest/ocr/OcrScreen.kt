@@ -44,7 +44,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.google.ar.core.ArCoreApk
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
@@ -113,9 +116,21 @@ private fun OcrCameraContent(modifier: Modifier = Modifier) {
     var frameResult by remember { mutableStateOf(OcrFrameResult()) }
     var objectDetections by remember { mutableStateOf<List<VisionObjectDetection>>(emptyList()) }
     var cameraError by remember { mutableStateOf<String?>(null) }
+    var useDepthMode by remember { mutableStateOf(true) }
+    var depthStatus by remember { mutableStateOf(ArDepthStatus()) }
 
     Column(modifier = modifier.fillMaxWidth()) {
-        OcrCameraPreview(
+        if (useDepthMode && ArCoreApk.getInstance().checkAvailability(LocalContext.current) == ArCoreApk.Availability.SUPPORTED_INSTALLED) {
+            ArCoreDepthPreview(
+                frameResult = frameResult,
+                objectDetections = objectDetections,
+                onResult = { frameResult = it; cameraError = null },
+                onObjectDetections = { objectDetections = it; cameraError = null },
+                onStatus = { depthStatus = it },
+                onError = { cameraError = it },
+                modifier = Modifier.fillMaxWidth().weight(3f)
+            )
+        } else OcrCameraPreview(
             frameResult = frameResult,
             objectDetections = objectDetections,
             onResult = {
@@ -135,11 +150,23 @@ private fun OcrCameraContent(modifier: Modifier = Modifier) {
         Spacer(modifier = Modifier.height(12.dp))
 
         Text(
+            text = "ARCore session: ${if (depthStatus.sessionActive) "active" else "inactive"} • " +
+                "Depth API: ${if (depthStatus.depthActive) "active" else "inactive"} • " +
+                "latest depth: ${depthStatus.latestDepthTimestampNanos?.let { "$it ns" } ?: "none"}",
+            color = MaterialTheme.colorScheme.onSurface,
+            style = MaterialTheme.typography.bodySmall
+        )
+        depthStatus.message?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        Button(onClick = { useDepthMode = !useDepthMode }) {
+            Text(if (useDepthMode) "USE CAMERA-ONLY FALLBACK" else "USE ARCORE DEPTH")
+        }
+
+        Text(
             text = if (objectDetections.isEmpty()) {
                 "Objects: none detected"
             } else {
                 "Objects: " + objectDetections.joinToString { detection ->
-                    "${detection.label} ${(detection.confidence * 100).toInt()}%"
+                    detection.displayLabel()
                 }
             },
             color = MaterialTheme.colorScheme.onSurface,
@@ -170,6 +197,49 @@ private fun OcrCameraContent(modifier: Modifier = Modifier) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodyLarge
         )
+    }
+}
+
+@Composable
+private fun ArCoreDepthPreview(
+    frameResult: OcrFrameResult,
+    objectDetections: List<VisionObjectDetection>,
+    onResult: (OcrFrameResult) -> Unit,
+    onObjectDetections: (List<VisionObjectDetection>) -> Unit,
+    onStatus: (ArDepthStatus) -> Unit,
+    onError: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val mainExecutor = remember(context) { ContextCompat.getMainExecutor(context) }
+    val view = remember {
+        ArCoreDepthCameraView(
+            context,
+            onText = { mainExecutor.execute { onResult(it) } },
+            onObjects = { mainExecutor.execute { onObjectDetections(it) } },
+            onStatus = { mainExecutor.execute { onStatus(it) } },
+            onError = { mainExecutor.execute { onError(it) } }
+        )
+    }
+    DisposableEffect(lifecycleOwner, view) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> view.resumeSession()
+                Lifecycle.Event.ON_PAUSE -> view.pauseSession()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) view.resumeSession()
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            view.release()
+        }
+    }
+    Box(modifier = modifier.background(Color.Black)) {
+        AndroidView(factory = { view }, modifier = Modifier.fillMaxSize())
+        VisionBoundingBoxOverlay(frameResult, objectDetections, Modifier.fillMaxSize())
     }
 }
 
@@ -320,7 +390,7 @@ private fun VisionBoundingBoxOverlay(
                 style = Stroke(width = 4.dp.toPx())
             )
 
-            val label = "${detection.label} ${(detection.confidence * 100).toInt()}%"
+            val label = detection.displayLabel()
             val labelWidth = textPaint.measureText(label) + 12.dp.toPx()
             val labelHeight = 22.dp.toPx()
             val labelTop = (top - labelHeight).coerceAtLeast(0f)
@@ -340,3 +410,7 @@ private fun VisionBoundingBoxOverlay(
         }
     }
 }
+
+private fun VisionObjectDetection.displayLabel(): String =
+    "$label ${(confidence * 100).toInt()}% • " +
+        (distanceMeters?.let { String.format(java.util.Locale.US, "%.1f m", it) } ?: "distance unavailable")
