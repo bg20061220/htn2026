@@ -765,7 +765,13 @@ fun NavigationScreen() {
         ) {
             OcrScreen(
                 onClose = { showOcrMode = false },
-                speakObstacleAlert = conversationManager::speakObstacleAlert
+                speakObstacleAlert = conversationManager::speakObstacleAlert,
+                onAvoidanceCommand = { avoidance ->
+                    // TODO: send over BLE to the ESP32 with the manual buttons; steering is -1..1 and
+                    // speedFactor 0..1 for proportional control.
+                    command = avoidance.action.name
+                    Log.d("MainActivity", "Avoidance: ${avoidance.summary}")
+                }
             )
         }
     }

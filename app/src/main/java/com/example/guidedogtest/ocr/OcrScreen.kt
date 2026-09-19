@@ -34,6 +34,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
@@ -52,6 +53,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.google.ar.core.ArCoreApk
+import kotlinx.coroutines.delay
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
@@ -59,7 +61,8 @@ import kotlin.math.min
 @Composable
 fun OcrScreen(
     onClose: () -> Unit,
-    speakObstacleAlert: (String) -> Boolean = { false }
+    speakObstacleAlert: (String) -> Boolean = { false },
+    onAvoidanceCommand: (AvoidanceCommand) -> Unit = {}
 ) {
     val context = LocalContext.current
     var cameraPermissionGranted by remember {
@@ -98,6 +101,7 @@ fun OcrScreen(
             if (cameraPermissionGranted) {
                 OcrCameraContent(
                     speakObstacleAlert = speakObstacleAlert,
+                    onAvoidanceCommand = onAvoidanceCommand,
                     modifier = Modifier.weight(1f)
                 )
             } else {
@@ -124,6 +128,7 @@ fun OcrScreen(
 @Composable
 private fun OcrCameraContent(
     speakObstacleAlert: (String) -> Boolean,
+    onAvoidanceCommand: (AvoidanceCommand) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var frameResult by remember { mutableStateOf(OcrFrameResult()) }
@@ -137,6 +142,42 @@ private fun OcrCameraContent(
     var sceneAwareness by remember { mutableStateOf<SceneAwarenessResult?>(null) }
     val obstacleAlertManager = remember {
         ObstacleAlertManager(speak = speakObstacleAlert)
+    }
+    var avoidanceEnabled by remember { mutableStateOf(false) }
+    var lastAvoidance by remember { mutableStateOf<AvoidanceCommand?>(null) }
+    val avoidanceController = remember { ObstacleAvoidanceController() }
+    val currentOnAvoidanceCommand by rememberUpdatedState(onAvoidanceCommand)
+
+    LaunchedEffect(sceneAwareness, avoidanceEnabled) {
+        if (!avoidanceEnabled) return@LaunchedEffect
+        sceneAwareness?.let {
+            val command = avoidanceController.update(it)
+            lastAvoidance = command
+            currentOnAvoidanceCommand(command)
+        }
+    }
+
+    // Stop the robot if depth results dry up (camera-only fallback, ARCore pause, tracking loss).
+    LaunchedEffect(avoidanceEnabled) {
+        if (!avoidanceEnabled) return@LaunchedEffect
+        avoidanceController.reset()
+        while (true) {
+            delay(500)
+            avoidanceController.checkStale()?.let {
+                lastAvoidance = it
+                currentOnAvoidanceCommand(it)
+            }
+        }
+    }
+
+    // Never leave the robot on a stale steering command when avoidance is switched off or the screen closes.
+    DisposableEffect(avoidanceEnabled) {
+        onDispose {
+            if (avoidanceEnabled) {
+                lastAvoidance = null
+                currentOnAvoidanceCommand(AvoidanceCommand(AvoidanceAction.STOP, reason = "avoidance off"))
+            }
+        }
     }
 
     LaunchedEffect(objectDetections, frameResult.imageWidth, obstacleAlertsEnabled, warningDistanceMeters) {
@@ -216,6 +257,23 @@ private fun OcrCameraContent(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall
             )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Obstacle Avoidance", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    text = lastAvoidance?.summary
+                        ?: "Steers the robot away from the closer side (needs ARCore depth)",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            Switch(checked = avoidanceEnabled, onCheckedChange = { avoidanceEnabled = it })
         }
 
         Text(
