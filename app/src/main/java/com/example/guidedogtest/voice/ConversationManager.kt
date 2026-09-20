@@ -242,9 +242,18 @@ class ConversationManager(
 
         if (safetyCommand != null) {
             onCommand(safetyCommand)
+            if (safetyCommand == RobotCommand.Stop) {
+                // Don't also speak here: onCommand(Stop) drives halt(), which
+                // always fires announceEmergencyStop() via emergencyStopSignal.
+                // Speaking "Stopping now." here too meant every stop produced
+                // two competing acknowledgements that interrupted each other
+                // (EMERGENCY_STOP priority always wins), which sounded like
+                // Goose failing to speak at all. halt()'s announcement is now
+                // the only source of this ack.
+                return
+            }
             _state.value = ConversationState.SPEAKING
             val ack = when (safetyCommand) {
-                RobotCommand.Stop -> "Stopping now."
                 RobotCommand.Forward -> "Going forward."
                 is RobotCommand.Turn -> "Turning ${safetyCommand.direction}."
                 else -> "Okay, going."
