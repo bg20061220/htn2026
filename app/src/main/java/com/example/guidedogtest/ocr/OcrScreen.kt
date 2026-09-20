@@ -150,8 +150,10 @@ private fun OcrCameraContent(
     var objectDetections by remember { mutableStateOf<List<VisionObjectDetection>>(emptyList()) }
     var cameraError by remember { mutableStateOf<String?>(null) }
     var depthStatus by remember { mutableStateOf(ArDepthStatus()) }
-    var autonomousEnabled by remember { mutableStateOf(false) }
-    var avoidanceDecision by remember { mutableStateOf(AvoidanceDecision(AvoidanceState.IDLE, com.example.guidedogtest.WheelSpeeds(0, 0), "AUTO OFF")) }
+    // Armed as soon as the camera view opens: opening it is the "go" gesture. Nothing moves on that
+    // alone - the controller still holds the robot stopped until it is connected and depth is live.
+    var autonomousEnabled by remember { mutableStateOf(true) }
+    var avoidanceDecision by remember { mutableStateOf(AvoidanceDecision(AvoidanceState.CREEP, com.example.guidedogtest.WheelSpeeds(0, 0), "STARTING")) }
     var obstacleAlertsEnabled by remember { mutableStateOf(false) }
     var warningDistanceMeters by remember { mutableStateOf(2f) }
     var lastObstacleAlert by remember { mutableStateOf<String?>(null) }
@@ -160,6 +162,12 @@ private fun OcrCameraContent(
         ObstacleAlertManager(speak = speakObstacleAlert)
     }
     val avoidanceController = remember { ObstacleAvoidanceController() }
+
+    // Tell the host the camera view is driving, so it routes our frames to the ESP32 and stands the
+    // route follower down. Without this the robot keeps whatever it was doing before the view opened.
+    LaunchedEffect(Unit) {
+        if (autonomousEnabled) onAutonomousAvoidanceEnabled(true)
+    }
 
     LaunchedEffect(emergencyStopSignal) {
         if (emergencyStopSignal > 0L) {

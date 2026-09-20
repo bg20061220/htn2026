@@ -3,7 +3,7 @@ package com.example.guidedogtest.ocr
 import android.os.SystemClock
 import com.example.guidedogtest.WheelSpeeds
 
-enum class AvoidanceState { IDLE, FORWARD, SLOW, TURN_LEFT, TURN_RIGHT, STOPPED }
+enum class AvoidanceState { IDLE, CREEP, FORWARD, SLOW, TURN_LEFT, TURN_RIGHT, STOPPED }
 
 data class AvoidanceDecision(
     val state: AvoidanceState,
@@ -18,6 +18,15 @@ class ObstacleAvoidanceController(
     private var state = AvoidanceState.IDLE
     private var lastDepthTimestampNanos: Long? = null
     private var lastDepthArrivalMillis = Long.MIN_VALUE
+    private var armed = false
+    private var creepPending = false
+
+    /**
+     * End of the opening creep, or null while it has not begun. The clock starts on the first frame
+     * the robot is actually allowed to move, not when avoidance is armed: depth takes a moment to
+     * come up, and a creep that expires while the robot is still held stopped never happens at all.
+     */
+    private var creepUntilMillis: Long? = null
 
     fun update(
         scene: SceneAwarenessResult?,
@@ -26,7 +35,16 @@ class ObstacleAvoidanceController(
         depthAvailable: Boolean,
         robotConnected: Boolean,
     ): AvoidanceDecision {
-        if (!enabled) return stop(AvoidanceState.IDLE, "AUTO OFF")
+        if (!enabled) {
+            armed = false
+            return stop(AvoidanceState.IDLE, "AUTO OFF")
+        }
+        if (!armed) {
+            armed = true
+            creepPending = true
+            creepUntilMillis = null
+            state = AvoidanceState.CREEP
+        }
         if (!robotConnected) return stop(reason = "STOP: ROBOT DISCONNECTED")
         if (!cameraAvailable) return stop(reason = "STOP: CAMERA UNAVAILABLE")
         if (!depthAvailable || scene?.depthTimestampNanos == null) {
@@ -76,6 +94,27 @@ class ObstacleAvoidanceController(
         val left = scene.leftDistanceMeters ?: return stop(reason = "STOP: SCENE UNKNOWN")
         val right = scene.rightDistanceMeters ?: return stop(reason = "STOP: SCENE UNKNOWN")
 
+        // Opening move: ease forward in a straight line for a moment so the robot visibly sets off
+        // before it starts hunting for the open side. Anything blocking the path cancels it outright
+        // - the creep is a nicety, and it never outranks the corridor being closed.
+        //
+        // This is a flag rather than a check on [state] because every safety gate above runs through
+        // stop(), which overwrites the state: a robot that armed before depth came up would arrive
+        // here as STOPPED and skip the creep it never got to take.
+        if (creepPending) {
+            val until = creepUntilMillis ?: (clockMillis() + CREEP_DURATION_MS).also { creepUntilMillis = it }
+            if (scene.centerState == SceneZoneState.BLOCKED || clockMillis() >= until) {
+                creepPending = false
+            } else {
+                state = AvoidanceState.CREEP
+                return AvoidanceDecision(
+                    state,
+                    WheelSpeeds(AUTO_CREEP_SPEED, AUTO_CREEP_SPEED - AUTO_CREEP_RIGHT_TRIM),
+                    "CREEP FORWARD",
+                )
+            }
+        }
+
         // Hold the selected side until the forward corridor is genuinely clear. Switch only when
         // that side becomes blocked and the opposite side is usable, preventing left/right chatter.
         if (state == AvoidanceState.TURN_LEFT || state == AvoidanceState.TURN_RIGHT) {
@@ -93,7 +132,7 @@ class ObstacleAvoidanceController(
         return when (scene.centerState) {
             SceneZoneState.CLEAR -> {
                 state = AvoidanceState.FORWARD
-                AvoidanceDecision(state, WheelSpeeds(AUTO_FORWARD_SPEED, AUTO_FORWARD_SPEED - AUTO_RIGHT_TRIM), "FORWARD")
+                forwardToward(left, right)
             }
             SceneZoneState.CAUTION -> {
                 state = AvoidanceState.SLOW
@@ -109,6 +148,35 @@ class ObstacleAvoidanceController(
             return stop(reason = "STOP: BOTH SIDES BLOCKED")
         }
         return if (left >= right) turnLeft() else turnRight()
+    }
+
+    /**
+     * Driving with the corridor open: hold speed, but lean toward whichever side has more room.
+     *
+     * The lean only engages once something is actually near enough to matter. In an open space the
+     * two sides differ by metres of pure depth noise, and veering at every frame toward the larger
+     * number would curve the robot around in circles instead of driving it down the middle.
+     */
+    private fun forwardToward(left: Float, right: Float): AvoidanceDecision {
+        val straight = WheelSpeeds(AUTO_FORWARD_SPEED, AUTO_FORWARD_SPEED - AUTO_RIGHT_TRIM)
+        if (minOf(left, right) > STEER_INFLUENCE_METERS) {
+            return AvoidanceDecision(state, straight, "FORWARD")
+        }
+        return if (left > right + SIDE_SWITCH_HYSTERESIS_METERS) {
+            AvoidanceDecision(
+                state,
+                WheelSpeeds(AUTO_FORWARD_SPEED - AUTO_STEER_BIAS, AUTO_FORWARD_SPEED - AUTO_RIGHT_TRIM),
+                "FORWARD / VEER LEFT",
+            )
+        } else if (right > left + SIDE_SWITCH_HYSTERESIS_METERS) {
+            AvoidanceDecision(
+                state,
+                WheelSpeeds(AUTO_FORWARD_SPEED, AUTO_FORWARD_SPEED - AUTO_RIGHT_TRIM - AUTO_STEER_BIAS),
+                "FORWARD / VEER RIGHT",
+            )
+        } else {
+            AvoidanceDecision(state, straight, "FORWARD")
+        }
     }
 
     private fun slowToward(left: Float, right: Float): AvoidanceDecision {
@@ -141,6 +209,18 @@ class ObstacleAvoidanceController(
         const val AUTO_FORWARD_SPEED = 110
         const val AUTO_SLOW_SPEED = 75
         const val AUTO_TURN_SPEED = 85
+
+        /**
+         * The opening creep. Deliberately the same PWM as [AUTO_SLOW_SPEED], which is the slowest
+         * pair this chassis is known to actually roll at - drop it much further and the motors sit
+         * under their stall threshold and buzz without turning a wheel.
+         */
+        const val AUTO_CREEP_SPEED = 75
+        const val CREEP_DURATION_MS = 1_200L
+        private const val AUTO_CREEP_RIGHT_TRIM = 12
+
+        /** Something must be at least this near before the lean engages; past it, drive straight. */
+        private const val STEER_INFLUENCE_METERS = 1.5f
         const val BLOCKED_DISTANCE_METERS = 0.8f
         const val CAUTION_DISTANCE_METERS = 1.5f
         const val SCENE_STALE_TIMEOUT_MS = 1_000L
