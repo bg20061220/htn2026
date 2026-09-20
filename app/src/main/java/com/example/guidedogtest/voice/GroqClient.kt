@@ -28,7 +28,12 @@ distance or feasibility. Your "speech" for a navigate command will not be spoken
 (the app replaces it with its own confirmation prompt), so it can be brief.
 
 Respond with ONLY a JSON object, no other text, in exactly this shape:
-{"speech": "<1-2 short sentences to speak aloud>", "command": "none|stop|go|turn_left|turn_right|navigate", "destination": "<only present if command is navigate>"}
+{"speech": "<1-2 short sentences to speak aloud>", "command": "none|stop|go|forward|turn_left|turn_right|navigate", "destination": "<only present if command is navigate>"}
+
+Use "go" to start following a route that has already been planned, and "forward" when the user
+wants the robot to move straight ahead right now (e.g. "go forward", "walk on", "keep going straight").
+"forward" drives the robot without a destination, so use it for any request to move ahead that does
+not name a place.
 """
 
 class GroqClient(private val apiKey: String) {
@@ -114,6 +119,7 @@ class GroqClient(private val apiKey: String) {
             val command = when (json.optString("command", "none")) {
                 "stop" -> RobotCommand.Stop
                 "go" -> RobotCommand.Go
+                "forward" -> RobotCommand.Forward
                 "turn_left" -> RobotCommand.Turn("left")
                 "turn_right" -> RobotCommand.Turn("right")
                 "navigate" -> RobotCommand.Navigate(json.optString("destination", ""))

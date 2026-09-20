@@ -175,16 +175,17 @@ class ConversationManager(
 
         // Local safety-phrase bypass: these must work with zero network
         // dependency, so we short-circuit before ever calling Groq.
-        val safetyCommand = when (transcript.trim().lowercase()) {
-            "stop", "halt" -> RobotCommand.Stop
-            "go" -> RobotCommand.Go
-            else -> null
-        }
+        val safetyCommand = localCommandFor(transcript)
 
         if (safetyCommand != null) {
             onCommand(safetyCommand)
             _state.value = ConversationState.SPEAKING
-            val ack = if (safetyCommand == RobotCommand.Stop) "Stopping now." else "Okay, going."
+            val ack = when (safetyCommand) {
+                RobotCommand.Stop -> "Stopping now."
+                RobotCommand.Forward -> "Going forward."
+                is RobotCommand.Turn -> "Turning ${safetyCommand.direction}."
+                else -> "Okay, going."
+            }
             speak(ack) { listenForCommand(withTimeout = true) }
             return
         }

@@ -213,6 +213,11 @@ fun NavigationScreen() {
             micPermissionGranted = granted
         }
 
+    // Something the UI needs said but cannot speak where it decides it: the voice assistant's
+    // onCommand lambda is constructed *by* the call that creates the manager, so it cannot call it.
+    // Corrections are queued here and spoken by the effect below, which has both in scope.
+    var pendingAnnouncement by remember { mutableStateOf<String?>(null) }
+
     // The robot link is created before the voice assistant: its commands reach the motors through the
     // same path as the manual buttons, so it has to exist first.
     val link = remember { RobotLink(context) }
@@ -247,7 +252,20 @@ fun NavigationScreen() {
                                     autonomousFrame = Drive.STOP_FRAME
                                     following = true
                                 } else {
-                                    routeStatus = "say a destination first"
+                                    // The assistant has already said "Okay, going." by now, so an
+                                    // audible correction matters more than the status line: a guide
+                                    // dog that says it is going and then stands still is worse than
+                                    // one that never claimed to move.
+                                    routeStatus = if (follower == null) {
+                                        "say a destination first"
+                                    } else {
+                                        "connect the robot first"
+                                    }
+                                    pendingAnnouncement = if (follower == null) {
+                                        "I need a destination first. Where would you like to go?"
+                                    } else {
+                                        "I'm not connected to the robot, so I can't walk there."
+                                    }
                                 }
                             }
 
@@ -258,6 +276,13 @@ fun NavigationScreen() {
                                 } else {
                                     "RIGHT"
                                 }
+                            }
+
+                            // Straight ahead, on the tuned FORWARD pair. No destination needed, so
+                            // this is the one that works on the bench with no route loaded.
+                            RobotCommand.Forward -> {
+                                stopFollowing()
+                                command = "FORWARD"
                             }
 
                             // The route for a spoken destination arrives on voiceRoute; the
@@ -286,6 +311,13 @@ fun NavigationScreen() {
             destinationLocation = spoken.destinationLocation
             placeSuggestions = emptyList()
             adoptRoute(spoken.plan, spoken.destinationName)
+        }
+    }
+
+    LaunchedEffect(pendingAnnouncement) {
+        pendingAnnouncement?.let {
+            conversationManager.announce(it)
+            pendingAnnouncement = null
         }
     }
 
