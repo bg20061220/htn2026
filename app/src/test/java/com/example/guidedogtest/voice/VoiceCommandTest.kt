@@ -1,7 +1,9 @@
 package com.example.guidedogtest.voice
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -43,5 +45,31 @@ class VoiceCommandTest {
         assertNull(localCommandFor("take me to the library"))
         assertNull(localCommandFor("where is the nearest coffee shop"))
         assertNull(localCommandFor(""))
+    }
+
+    @Test
+    fun theWakeWordIsFoundInTheMiddleOfASentence() {
+        // Matched on partial results too, so it has to work before the sentence is finished.
+        assertTrue(containsWakeWord("hey goose"))
+        assertTrue(containsWakeWord("GOOSE, take me home"))
+
+        // ...but half a wake word is not a wake word: firing on "goo" would fire on anything.
+        assertFalse(containsWakeWord("okay goo"))
+        assertFalse(containsWakeWord("hello there"))
+        assertFalse(containsWakeWord(""))
+    }
+
+    @Test
+    fun aStopWordIsHeardWhereverItAppears() {
+        // The always-listening loop acts on this without a wake word, so it has to catch the word
+        // inside a longer utterance, and it errs towards stopping.
+        assertTrue(containsStopWord("stop"))
+        assertTrue(containsStopWord("goose stop"))
+        assertTrue(containsStopWord("okay stop the robot now"))
+        assertTrue(containsStopWord("HALT!"))
+        assertTrue(containsStopWord("cancel that"))
+
+        assertFalse(containsStopWord("goose take me to the library"))
+        assertFalse(containsStopWord(""))
     }
 }

@@ -131,6 +131,11 @@ fun NavigationScreen() {
     var routeMessage by remember { mutableStateOf<String?>(null) }
     var routeLoading by remember { mutableStateOf(false) }
     var command by remember { mutableStateOf("STOP") }
+
+    // Something the UI needs said but cannot speak where it decides it: the voice assistant's
+    // onCommand lambda is constructed *by* the call that creates the manager, so it cannot call it.
+    // Corrections are queued here and spoken by the effect that drains it.
+    var pendingAnnouncement by remember { mutableStateOf<String?>(null) }
     var showOcrMode by remember { mutableStateOf(false) }
 
     // Live position, so the follower never works from a stale fix.
@@ -178,6 +183,19 @@ fun NavigationScreen() {
     }
 
     /**
+     * Everything that stops the robot goes through here: the STOP button, the assistant's stop
+     * command, and the stop word the always-listening loop picks up. One path, so a stop cannot work
+     * from one place and be forgotten in another.
+     */
+    fun halt(sayIt: Boolean = true) {
+        stopFollowing()
+        command = "STOP"
+        autonomousFrame = Drive.STOP_FRAME
+        routeStatus = "stopped"
+        if (sayIt) pendingAnnouncement = "Stopping."
+    }
+
+    /**
      * Adopts one route for both consumers: the map and voice read the plan, the follower drives its
      * steps. Typed destinations, picked places and spoken ones all land here, so there is a single
      * place where a route becomes the robot's behaviour.
@@ -213,11 +231,6 @@ fun NavigationScreen() {
             micPermissionGranted = granted
         }
 
-    // Something the UI needs said but cannot speak where it decides it: the voice assistant's
-    // onCommand lambda is constructed *by* the call that creates the manager, so it cannot call it.
-    // Corrections are queued here and spoken by the effect below, which has both in scope.
-    var pendingAnnouncement by remember { mutableStateOf<String?>(null) }
-
     // The robot link is created before the voice assistant: its commands reach the motors through the
     // same path as the manual buttons, so it has to exist first.
     val link = remember { RobotLink(context) }
@@ -239,10 +252,7 @@ fun NavigationScreen() {
                         // they take the motors back from the follower and set the command the
                         // transmit loop sends. Nothing about voice reaches the car another way.
                         when (robotCommand) {
-                            RobotCommand.Stop -> {
-                                stopFollowing()
-                                command = "STOP"
-                            }
+                            RobotCommand.Stop -> halt()
 
                             RobotCommand.Go -> {
                                 // "Go" means start following the route that is already loaded - the
@@ -291,7 +301,11 @@ fun NavigationScreen() {
 
                             RobotCommand.None -> Unit
                         }
-                    }
+                    },
+                    // Heard by the always-listening loop, with no wake word and no round trip: the
+                    // person saying "stop" means now, and this is the one path that fires while the
+                    // robot is walking and nothing else is going on.
+                    onStopWord = { halt() }
                 )
             }
         }

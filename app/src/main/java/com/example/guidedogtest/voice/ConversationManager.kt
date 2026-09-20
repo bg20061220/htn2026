@@ -52,7 +52,13 @@ class ConversationManager(
     elevenLabsApiKey: String,
     private val sensorProvider: () -> SensorSnapshot = { SensorSnapshot() },
     private val locationProvider: () -> LatLng? = { null },
-    private val onCommand: (RobotCommand) -> Unit = {}
+    private val onCommand: (RobotCommand) -> Unit = {},
+    /**
+     * A stop word heard by the always-listening loop, outside any conversation turn. The loop owns
+     * the mic, so this is the only place a stop can be heard while nothing else is going on - which
+     * is exactly when the robot is walking.
+     */
+    private val onStopWord: () -> Unit = {}
 ) : ViewModel() {
 
     private val appContext = context.applicationContext
@@ -72,7 +78,11 @@ class ConversationManager(
     private val placesClient: PlacesClient = Places.createClient(appContext)
     private val history = mutableListOf<ChatTurn>()
 
-    private val wakeWordDetector = WakeWordDetector(context) { onWakeWordDetected() }
+    private val wakeWordDetector = WakeWordDetector(
+        context = context,
+        onWakeWordDetected = { onWakeWordDetected() },
+        onStopWordDetected = { onStopWord() },
+    )
 
     private var followUpTimeoutJob: Job? = null
 

@@ -27,7 +27,7 @@ sealed class RobotCommand {
 }
 
 /**
- * The commands that work with no network at all, matched on the transcript itself.
+ * The phrases that bypass the model, matched on a whole transcript.
  *
  * These are the ones where a round trip through Groq is the wrong trade: someone saying "stop" or
  * "go forward" needs the motors to answer now, and needs them to answer when the phone has no data.
@@ -44,6 +44,31 @@ fun localCommandFor(transcript: String): RobotCommand? =
         "turn right", "right" -> RobotCommand.Turn("right")
         else -> null
     }
+
+/**
+ * Is the wake word in this transcript?
+ *
+ * Matched as a substring, not a word: this runs on partial results too, where the word may still be
+ * half-formed, and being early matters more than being tidy.
+ */
+fun containsWakeWord(transcript: String): Boolean =
+    transcript.lowercase().contains(WAKE_WORD)
+
+/**
+ * Does this transcript contain a word that must stop the robot?
+ *
+ * This is the one phrase the always-listening loop acts on without a wake word and without asking
+ * the model, because the person saying it is telling the robot to stop *now*. It also errs towards
+ * stopping: a false positive costs a standstill, and a false negative costs a collision.
+ */
+fun containsStopWord(transcript: String): Boolean {
+    val lower = transcript.lowercase()
+    return STOP_WORDS.any { lower.contains(it) }
+}
+
+private const val WAKE_WORD = "goose"
+
+private val STOP_WORDS = listOf("stop", "halt", "cancel")
 
 data class ChatTurn(val role: String, val content: String)
 

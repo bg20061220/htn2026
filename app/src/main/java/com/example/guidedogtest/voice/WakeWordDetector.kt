@@ -26,12 +26,21 @@ private const val TAG = "WakeWordDetector"
  */
 class WakeWordDetector(
     private val context: Context,
-    private val onWakeWordDetected: () -> Unit
+    private val onWakeWordDetected: () -> Unit,
+    /**
+     * Called the moment a stop word is heard, whatever else is going on and without the wake word:
+     * the loop is listening to everything anyway, so a stop does not have to be asked for twice.
+     */
+    private val onStopWordDetected: () -> Unit = {}
 ) {
     private var recognizer: SpeechRecognizer? = null
     private val handler = Handler(Looper.getMainLooper())
     private var isActive = false
     private var consecutiveErrors = 0
+
+    /** True once a stop has been fired for the utterance being listened to, so partials don't repeat it. */
+    private var stopSent = false
+
     private val listener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {}
         override fun onBeginningOfSpeech() {}
@@ -46,7 +55,8 @@ class WakeWordDetector(
         }
 
         override fun onResults(results: Bundle?) {
-            if (containsWakeWord(results)) {
+            if (heardStopWord(results)) return
+            if (containsWakeWord(transcriptOf(results))) {
                 fireWakeWord()
             } else {
                 consecutiveErrors = 0
@@ -55,15 +65,27 @@ class WakeWordDetector(
         }
 
         override fun onPartialResults(partialResults: Bundle?) {
-            if (containsWakeWord(partialResults)) {
+            if (heardStopWord(partialResults)) return
+            if (containsWakeWord(transcriptOf(partialResults))) {
                 fireWakeWord()
             }
         }
     }
 
-    private fun containsWakeWord(bundle: Bundle?): Boolean {
-        val matches = bundle?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-        return matches?.any { it.lowercase().contains("goose") } == true
+    private fun transcriptOf(bundle: Bundle?): String =
+        bundle?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.joinToString(" ").orEmpty()
+
+    /**
+     * Acts on a stop word if one was heard, once per utterance.
+     *
+     * It does not stop listening: the loop has to keep running so the next thing said is heard too.
+     */
+    private fun heardStopWord(bundle: Bundle?): Boolean {
+        if (stopSent || !containsStopWord(transcriptOf(bundle))) return false
+        stopSent = true
+        Log.d(TAG, "stop word heard")
+        onStopWordDetected()
+        return true
     }
 
     private fun fireWakeWord() {
@@ -84,6 +106,7 @@ class WakeWordDetector(
     private fun startListeningInternal() {
         if (!isActive) return
         recognizer?.destroy()
+        stopSent = false
         recognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
             setRecognitionListener(listener)
             startListening(
