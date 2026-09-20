@@ -84,62 +84,25 @@ class WakeWordDetector(
     private fun startListeningInternal() {
         if (!isActive) return
         recognizer?.destroy()
-        recognizer = newRecognizer().apply {
+        recognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
             setRecognitionListener(listener)
             startListening(
                 Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                     putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                     putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
-                    // Keep the audio on the phone: the network recognizer makes the chime you hear on
-                    // every restart, and this loop restarts constantly.
-                    putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
                 }
             )
         }
-    }
-
-    /**
-     * The device's own recognizer when it has one.
-     *
-     * The chime comes from the network recognizer's service, so this is what makes an always-restarting
-     * loop quiet - and it answers faster, which matters more here than transcription quality, because
-     * the only word this loop has to notice is "goose".
-     *
-     * Falls back to the network recognizer on older devices, or wherever the on-device model is not
-     * installed, in which case the chime comes back with it.
-     */
-    private fun newRecognizer(): SpeechRecognizer {
-        val onDevice = hasOnDeviceRecognizer()
-        return try {
-            if (onDevice) {
-                Log.d(TAG, "listening on the on-device recognizer")
-                SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
-            } else {
-                Log.d(TAG, "listening on the network recognizer")
-                SpeechRecognizer.createSpeechRecognizer(context)
-            }
-        } catch (e: Exception) {
-            Log.d(TAG, "Falling back to the network recognizer: ${e.javaClass.simpleName}")
-            SpeechRecognizer.createSpeechRecognizer(context)
-        }
-    }
-
-    private fun hasOnDeviceRecognizer(): Boolean = when {
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU ->
-            SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
-
-        // createOnDeviceSpeechRecognizer exists from API 31; before 33 there is no way to ask first,
-        // so try it and let newRecognizer() fall back if it throws.
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> true
-
-        else -> false
     }
 
     fun start() {
         if (isActive) return
         isActive = true
         consecutiveErrors = 0
+        // Logged once per start, not per cycle: this loop restarts several times a second and the
+        // log would otherwise be nothing but this line.
+        Log.d(TAG, "wake word listening")
         startListeningInternal()
     }
 
