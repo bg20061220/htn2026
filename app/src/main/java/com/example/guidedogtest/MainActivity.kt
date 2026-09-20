@@ -1,7 +1,12 @@
 package com.example.guidedogtest
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Path
 import android.location.Location
 import android.os.Bundle
 import android.os.Looper
@@ -21,6 +26,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -30,12 +37,9 @@ import com.example.guidedogtest.ocr.OcrScreen
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
-import com.example.guidedogtest.maps.computeWalkingRoute
-import com.example.guidedogtest.maps.formatDistance
-import com.example.guidedogtest.maps.formatDuration
-import com.example.guidedogtest.maps.getMapsApiKey
 import com.example.guidedogtest.ui.theme.GuideDogTestTheme
 import com.example.guidedogtest.voice.ConversationManager
+import com.example.guidedogtest.voice.RobotCommand
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.maps.CameraUpdateFactory
@@ -61,11 +65,15 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
+import com.google.maps.android.compose.Circle
 import com.google.maps.android.compose.GoogleMap
+import com.google.maps.android.compose.MapEffect
 import com.google.maps.android.compose.Marker
 import com.google.maps.android.compose.Polyline
 import com.google.maps.android.compose.rememberCameraPositionState
 import com.google.maps.android.compose.rememberUpdatedMarkerState
+import com.google.android.gms.maps.model.BitmapDescriptor
+import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import java.io.IOException
 import kotlin.math.max
 import kotlin.math.min
@@ -75,7 +83,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         if (!Places.isInitialized()) {
-            val mapsApiKey = getMapsApiKey(this)
+            // One key source for the whole app: BuildConfig, out of the gitignored local.properties.
+            val mapsApiKey = BuildConfig.MAPS_API_KEY
             if (mapsApiKey.isNotBlank()) {
                 Places.initializeWithNewPlacesApiEnabled(applicationContext, mapsApiKey)
             }
@@ -168,6 +177,22 @@ fun NavigationScreen() {
         autonomousFrame = null
     }
 
+    /**
+     * Adopts one route for both consumers: the map and voice read the plan, the follower drives its
+     * steps. Typed destinations, picked places and spoken ones all land here, so there is a single
+     * place where a route becomes the robot's behaviour.
+     */
+    fun adoptRoute(plan: RoutePlan, label: String) {
+        routePoints = plan.points
+        routeDistance = formatDistance(plan.distanceMeters)
+        routeDuration = formatDuration(plan.durationSeconds)
+        routeInstructions = plan.instructions
+        routeMessage = null
+        routeSteps = plan.steps
+        follower = RouteFollower(plan.steps, tuning = { motorSettings })
+        routeStatus = "${plan.steps.size} steps, ${formatDistance(plan.distanceMeters)} to $label"
+    }
+
     var arCoreStatus by remember { mutableStateOf("Not checked") }
     var depthStatus by remember { mutableStateOf("Not checked") }
 
@@ -188,6 +213,10 @@ fun NavigationScreen() {
             micPermissionGranted = granted
         }
 
+    // The robot link is created before the voice assistant: its commands reach the motors through the
+    // same path as the manual buttons, so it has to exist first.
+    val link = remember { RobotLink(context) }
+
     val conversationManager: ConversationManager = viewModel(
         factory = viewModelFactory {
             initializer {
@@ -201,9 +230,42 @@ fun NavigationScreen() {
                         if (lat != null && lng != null) LatLng(lat, lng) else null
                     },
                     onCommand = { robotCommand ->
-                        // TODO: wire into BLE once the ESP32 link exists —
-                        // same as the FORWARD/LEFT/STOP/RIGHT buttons below.
-                        Log.d("MainActivity", "Voice robot command: $robotCommand")
+                        // Voice commands go through exactly the same path as the manual buttons:
+                        // they take the motors back from the follower and set the command the
+                        // transmit loop sends. Nothing about voice reaches the car another way.
+                        when (robotCommand) {
+                            RobotCommand.Stop -> {
+                                stopFollowing()
+                                command = "STOP"
+                            }
+
+                            RobotCommand.Go -> {
+                                // "Go" means start following the route that is already loaded - the
+                                // voice has just talked the walker through it and they have said yes.
+                                if (follower != null && link.connected) {
+                                    command = "STOP"
+                                    autonomousFrame = Drive.STOP_FRAME
+                                    following = true
+                                } else {
+                                    routeStatus = "say a destination first"
+                                }
+                            }
+
+                            is RobotCommand.Turn -> {
+                                stopFollowing()
+                                command = if (robotCommand.direction.lowercase().contains("left")) {
+                                    "LEFT"
+                                } else {
+                                    "RIGHT"
+                                }
+                            }
+
+                            // The route for a spoken destination arrives on voiceRoute; the
+                            // effect below turns it into the follower's route.
+                            is RobotCommand.Navigate -> Unit
+
+                            RobotCommand.None -> Unit
+                        }
                     }
                 )
             }
@@ -214,25 +276,22 @@ fun NavigationScreen() {
     val lastSpoken by conversationManager.lastSpoken.collectAsState()
     val voiceRoute by conversationManager.voiceRoute.collectAsState()
 
-    LaunchedEffect(micPermissionGranted) {
-        if (micPermissionGranted) {
-            conversationManager.start()
+    // A destination spoken to the robot becomes the route the robot drives, so "go" afterwards
+    // leads along exactly the walk the voice just described. One effect: the map state and the
+    // follower come from the same plan.
+    LaunchedEffect(voiceRoute) {
+        voiceRoute?.let { spoken ->
+            destination = spoken.destinationName
+            destinationName = spoken.destinationName
+            destinationLocation = spoken.destinationLocation
+            placeSuggestions = emptyList()
+            adoptRoute(spoken.plan, spoken.destinationName)
         }
     }
 
-    // Mirrors a voice-confirmed destination into the same map/route state
-    // the manual search flow uses, so both paths render identically.
-    LaunchedEffect(voiceRoute) {
-        voiceRoute?.let { route ->
-            destination = route.destinationName
-            destinationName = route.destinationName
-            destinationLocation = route.destinationLocation
-            routePoints = route.points
-            routeDistance = formatDistance(route.distanceMeters)
-            routeDuration = formatDuration(route.durationSeconds)
-            routeInstructions = route.instructions
-            routeMessage = null
-            placeSuggestions = emptyList()
+    LaunchedEffect(micPermissionGranted) {
+        if (micPermissionGranted) {
+            conversationManager.start()
         }
     }
 
@@ -254,6 +313,16 @@ fun NavigationScreen() {
     val fallbackLocation = remember { LatLng(0.0, 0.0) }
     val cameraPositionState = rememberCameraPositionState {
         position = CameraPosition.fromLatLngZoom(fallbackLocation, 1f)
+    }
+
+    // While the robot is driving itself, the map keeps it in view. Otherwise the camera is left to
+    // the route-bounds effect below, so a loaded route is still shown end to end.
+    LaunchedEffect(following, currentLocation) {
+        if (following) {
+            currentLocation?.let {
+                cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(it, 17f))
+            }
+        }
     }
 
     LaunchedEffect(currentLocation, destinationLocation, routePoints) {
@@ -384,8 +453,6 @@ fun NavigationScreen() {
             }
         }
 
-    val link = remember { RobotLink(context) }
-
     val bluetoothPermissionLauncher =
         rememberLauncherForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions()
@@ -493,7 +560,23 @@ fun NavigationScreen() {
             return@LaunchedEffect
         }
 
+        // The step a cue has been spoken for, so a turn is announced once when it becomes current
+        // rather than every tick the loop runs.
+        var announcedStep = -1
+
         while (following && link.connected) {
+
+            if (active.index != announcedStep) {
+                announcedStep = active.index
+                active.currentStep?.let { step ->
+                    val cue = if (step.distanceMeters > 0) {
+                        "${step.instruction}, ${formatDistance(step.distanceMeters)}"
+                    } else {
+                        step.instruction
+                    }
+                    conversationManager.announce(cue)
+                }
+            }
 
             val location = lastLocation
 
@@ -569,18 +652,6 @@ fun NavigationScreen() {
             connected = link.connected,
             linkStatus = link.status,
             onConnect = { connectRobot() },
-            onBack = { screen = Screen.Controls },
-        )
-        return
-    }
-
-    if (screen == Screen.LiveMap) {
-        LiveLocationScreen(
-            location = lastLocation,
-            headingDegrees = headingSource.headingDegrees,
-            onRequestPermission = {
-                locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
-            },
             onBack = { screen = Screen.Controls },
         )
         return
@@ -727,15 +798,6 @@ fun NavigationScreen() {
         Spacer(modifier = Modifier.height(12.dp))
 
         Button(
-            onClick = { screen = Screen.LiveMap },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("LIVE MAP")
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Button(
             onClick = {
 
                 if (
@@ -768,17 +830,38 @@ fun NavigationScreen() {
 
         Spacer(modifier = Modifier.height(16.dp))
 
+        // One map for the whole app: the route line and the chosen places, plus the robot itself -
+        // an arrow rotated to its heading and a ring showing how good the fix is.
+        var robotArrow by remember { mutableStateOf<BitmapDescriptor?>(null) }
+
         GoogleMap(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(280.dp),
             cameraPositionState = cameraPositionState
         ) {
+            // The SDK is only ready once the map exists, and BitmapDescriptorFactory throws before
+            // that - which is why the arrow is built here rather than during composition.
+            MapEffect(Unit) { robotArrow = headingArrowIcon(context) }
+
             currentLocation?.let { location ->
                 Marker(
                     state = rememberUpdatedMarkerState(position = location),
-                    title = "Current Location"
+                    title = "Current Location",
+                    icon = robotArrow ?: BitmapDescriptorFactory.defaultMarker(),
+                    rotation = (headingSource.headingDegrees ?: 0.0).toFloat(),
+                    flat = true,
+                    anchor = Offset(0.5f, 0.5f),
                 )
+                lastLocation?.let { fix ->
+                    Circle(
+                        center = location,
+                        radius = fix.accuracy.toDouble(),
+                        fillColor = Color(0x221B5E20),
+                        strokeColor = Color(0x661B5E20),
+                        strokeWidth = 2f,
+                    )
+                }
             }
             destinationLocation?.let { location ->
                 Marker(
@@ -910,99 +993,58 @@ fun NavigationScreen() {
 
         Button(
             onClick = {
-                val origin = currentLocation
-                val selectedDestination = destinationLocation
-                when {
-                    origin == null -> {
-                        routeMessage = "Current GPS location is unavailable. Tap GET CURRENT LOCATION first."
-                    }
-                    selectedDestination == null -> {
-                        routeMessage = "Select a destination from the place suggestions first."
-                    }
-                    else -> coroutineScope.launch {
-                        routeLoading = true
-                        routeMessage = null
-                        routePoints = emptyList()
-                        routeDistance = null
-                        routeDuration = null
-                        routeInstructions = emptyList()
-
-                        try {
-                            val apiKey = getMapsApiKey(context)
-                            if (apiKey.isBlank()) {
-                                throw IOException("The Maps API key is unavailable.")
-                            }
-                            val route = computeWalkingRoute(
-                                context = context,
-                                apiKey = apiKey,
-                                origin = origin,
-                                destination = selectedDestination
-                            )
-                            routePoints = route.points
-                            routeDistance = formatDistance(route.distanceMeters)
-                            routeDuration = formatDuration(route.durationSeconds)
-                            routeInstructions = route.instructions
-                            routeMessage = if (route.instructions.isEmpty()) {
-                                "Route found, but no turn-by-turn instructions were returned."
-                            } else {
-                                null
-                            }
-                        } catch (error: Exception) {
-                            routeMessage = error.message
-                                ?: "Unable to calculate the walking route. Check your connection and try again."
-                        } finally {
-                            routeLoading = false
-                        }
-                    }
-                }
-
-                // The same button also loads the route the robot drives: two stacks for now - the
-                // one above draws the map and feeds the voice cues, this one feeds RouteFollower.
-                // They should be reconciled onto a single source of routes.
                 val key = BuildConfig.MAPS_API_KEY
                 if (key.isBlank()) {
-                    routeStatus = "add MAPS_API_KEY to local.properties, then rebuild"
+                    routeMessage = "Add MAPS_API_KEY to local.properties, then rebuild."
                     return@Button
                 }
 
-                val here = lastLocation
-                if (here == null) {
-                    routeStatus = "waiting for a GPS fix"
+                val origin = currentLocation
+                if (origin == null) {
+                    routeMessage = "Current GPS location is unavailable. Tap GET CURRENT LOCATION first."
                     return@Button
                 }
 
-                if (destination.isBlank()) {
-                    routeStatus = "type a destination first"
+                // A picked or spoken place beats the typed text: it is a point, not an address to
+                // look up again.
+                val typed = destination.trim()
+                val picked = destinationLocation
+                if (picked == null && typed.isBlank()) {
+                    routeMessage = "Type a destination, or pick one from the suggestions."
                     return@Button
                 }
 
-                routeStatus = "requesting a walking route to \"$destination\"..."
+                val target = picked
+                    ?.let { RouteDestination.Point(it.latitude, it.longitude) }
+                    ?: RouteDestination.Address(typed)
+                val label = destinationName ?: typed
 
-                scope.launch {
-                    val result = withContext(Dispatchers.IO) {
-                        runCatching {
+                routeLoading = true
+                routeMessage = null
+                routeStatus = "requesting a walking route to \"$label\"..."
+
+                coroutineScope.launch {
+                    try {
+                        val plan = withContext(Dispatchers.IO) {
                             RoutesApi.fetchRoute(
                                 apiKey = key,
-                                origin = GeoPoint(here.latitude, here.longitude),
-                                destination = destination,
+                                origin = GeoPoint(origin.latitude, origin.longitude),
+                                destination = target,
                             )
                         }
+                        adoptRoute(plan, label)
+                    } catch (error: Exception) {
+                        routePoints = emptyList()
+                        routeInstructions = emptyList()
+                        routeDistance = null
+                        routeDuration = null
+                        routeSteps = emptyList()
+                        follower = null
+                        routeMessage = error.message ?: "Unable to calculate the walking route."
+                        routeStatus = error.message ?: "route request failed"
+                    } finally {
+                        routeLoading = false
                     }
-
-                    result
-                        .onSuccess { steps ->
-                            routeSteps = steps
-                            // The follower reads the tuned wheel values every tick, so what is set
-                            // on the Configure Robot page is what a route drives.
-                            follower = RouteFollower(steps, tuning = { motorSettings })
-                            routeStatus =
-                                "${steps.size} steps, ${steps.sumOf { it.distanceMeters }} m"
-                        }
-                        .onFailure { error ->
-                            routeSteps = emptyList()
-                            follower = null
-                            routeStatus = error.message ?: "route request failed"
-                        }
                 }
             },
             enabled = !routeLoading,
@@ -1129,8 +1171,43 @@ fun NavigationScreen() {
 private const val FOLLOW_TICK_MS = 100L
 
 /** The screens: the controls, the live map, and the manual drive tuning page. */
-private enum class Screen { Controls, LiveMap, ConfigureRobot }
+private enum class Screen { Controls, ConfigureRobot }
 
 /** GPS course over ground, only trustworthy while actually moving - standing still it is noise. */
 private fun gpsCourse(location: Location): Double? =
     if (location.hasBearing() && location.speed > 0.3f) location.bearing.toDouble() else null
+
+/** "NE 51°", or a dash until the compass has a value. */
+internal fun headingText(heading: Double?): String =
+    heading?.let { "${Geo.compassPoint(it)} ${it.toInt()}°" } ?: "unknown"
+
+/**
+ * The "you are here" arrow: a triangle pointing up the bitmap, which on a north-up map means north.
+ * The marker's rotation carries the robot's heading.
+ *
+ * Built on demand rather than during composition: BitmapDescriptorFactory throws until the Maps SDK
+ * has been initialised by the map itself.
+ */
+private fun headingArrowIcon(context: Context): BitmapDescriptor {
+    val size = (26 * context.resources.displayMetrics.density).toInt().coerceAtLeast(26)
+    val extent = size.toFloat()
+
+    val path = Path().apply {
+        moveTo(extent / 2f, extent * 0.04f)
+        lineTo(extent * 0.94f, extent * 0.86f)
+        lineTo(extent / 2f, extent * 0.62f)
+        lineTo(extent * 0.06f, extent * 0.86f)
+        close()
+    }
+
+    val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    Canvas(bitmap).drawPath(
+        path,
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xFF1B5E20.toInt()
+            style = Paint.Style.FILL
+        },
+    )
+
+    return BitmapDescriptorFactory.fromBitmap(bitmap)
+}

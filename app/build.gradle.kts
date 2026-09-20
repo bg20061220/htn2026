@@ -75,6 +75,9 @@ dependencies {
     implementation(libs.mlkit.text.recognition)
     implementation(libs.tensorflow.lite.task.vision)
     testImplementation(libs.junit)
+    // The Android org.json is a stub on the unit-test classpath, and the route parsing is worth
+    // testing on the JVM rather than only on a device.
+    testImplementation("org.json:json:20260814")
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.espresso.core)

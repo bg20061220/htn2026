@@ -4,11 +4,15 @@ import android.content.Context
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.guidedogtest.BuildConfig
+import com.example.guidedogtest.RouteDestination
+import com.example.guidedogtest.RoutePlan
+import com.example.guidedogtest.RouteStep
+import com.example.guidedogtest.RoutesApi
+import com.example.guidedogtest.formatDistance
+import com.example.guidedogtest.formatDuration
+import com.example.guidedogtest.GeoPoint
 import com.example.guidedogtest.maps.ResolvedPlace
-import com.example.guidedogtest.maps.computeWalkingRoute
-import com.example.guidedogtest.maps.formatDistance
-import com.example.guidedogtest.maps.formatDuration
-import com.example.guidedogtest.maps.getMapsApiKey
 import com.example.guidedogtest.maps.resolveBestPlace
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.libraries.places.api.Places
@@ -31,11 +35,16 @@ private val DENY_WORDS = listOf("no", "nope", "not", "wrong", "cancel", "nevermi
 data class VoiceRoute(
     val destinationName: String,
     val destinationLocation: LatLng,
-    val distanceMeters: Int,
-    val durationSeconds: Double,
-    val points: List<LatLng>,
-    val instructions: List<String>
-)
+    val plan: RoutePlan,
+) {
+    val distanceMeters: Int get() = plan.distanceMeters
+    val durationSeconds: Double get() = plan.durationSeconds
+    val points: List<LatLng> get() = plan.points
+    val instructions: List<String> get() = plan.instructions
+
+    /** The steps the robot drives, so a spoken destination becomes the same route the UI loads. */
+    val steps: List<RouteStep> get() = plan.steps
+}
 
 class ConversationManager(
     context: Context,
@@ -90,6 +99,21 @@ class ConversationManager(
      */
     fun speakObstacleAlert(text: String): Boolean {
         if (_state.value != ConversationState.LISTENING_FOR_WAKE_WORD || text.isBlank()) return false
+        wakeWordDetector.pause()
+        _state.value = ConversationState.SPEAKING
+        speak(text) { returnToWakeWordListening() }
+        return true
+    }
+
+    /**
+     * Speaks a navigation cue - the turn the robot is about to make.
+     *
+     * Unlike an obstacle alert this interrupts a turn in progress: the person on the leash needs the
+     * cue more than the conversation does, and the cue is what they steer by. It still refuses to
+     * talk over itself, so a burst of step changes cannot queue up a wall of speech.
+     */
+    fun announce(text: String): Boolean {
+        if (_state.value == ConversationState.SPEAKING || text.isBlank()) return false
         wakeWordDetector.pause()
         _state.value = ConversationState.SPEAKING
         speak(text) { returnToWakeWordListening() }
@@ -226,21 +250,25 @@ class ConversationManager(
 
                 _state.value = ConversationState.THINKING
                 try {
-                    val apiKey = getMapsApiKey(appContext)
-                    val route = computeWalkingRoute(appContext, apiKey, origin, place.location)
+                    val apiKey = BuildConfig.MAPS_API_KEY
+                    val plan = RoutesApi.fetchRoute(
+                        apiKey = apiKey,
+                        origin = GeoPoint(origin.latitude, origin.longitude),
+                        destination = RouteDestination.Point(
+                            lat = place.location.latitude,
+                            lng = place.location.longitude,
+                        ),
+                    )
                     _voiceRoute.value = VoiceRoute(
                         destinationName = place.name,
                         destinationLocation = place.location,
-                        distanceMeters = route.distanceMeters,
-                        durationSeconds = route.durationSeconds,
-                        points = route.points,
-                        instructions = route.instructions
+                        plan = plan,
                     )
                     onCommand(RobotCommand.Navigate(place.name))
                     _state.value = ConversationState.SPEAKING
                     speak(
-                        "Okay, heading to ${place.name}. That's about ${formatDistance(route.distanceMeters)}, " +
-                            "roughly ${formatDuration(route.durationSeconds)} on foot."
+                        "Okay, heading to ${place.name}. That's about ${formatDistance(plan.distanceMeters)}, " +
+                            "roughly ${formatDuration(plan.durationSeconds)} on foot."
                     ) { listenForCommand(withTimeout = true) }
                 } catch (e: Exception) {
                     Log.d(TAG, "Route computation failed: ${e.message}")
