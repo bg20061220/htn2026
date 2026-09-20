@@ -1,0 +1,23 @@
+====================================================================================================
+GROQ CONTRACT CHECK — one chat/completions call, exactly the body GroqClient builds
+====================================================================================================
+endpoint        : https://api.groq.com/openai/v1/chat/completions
+model           : openai/gpt-oss-20b
+api key         : gsk_KL... (GROQ_API_KEY)
+client timeout  : GroqClient.kt:42 .callTimeout(4 s)
+request bytes   : 2216
+response_format : json_object
+sensor_state    : {"frontDistanceMm":1250,"obstacleLeft":true,"obstacleRight":false,"dropoffDetected":false,"isMoving":true,"hazardsKnown":true}  (a live hazard, from SceneSnapshot.kt)
+user turn       : 'goose, what is around me right now'  (the persona's hazard-awareness path)
+
+HTTP status     : 200
+content-type    : application/json
+elapsed         : 0.750 s
+usage           : {'queue_time': 0.170810519, 'prompt_tokens': 575, 'prompt_time': 0.035392986, 'completion_tokens': 369, 'completion_time': 0.399529278, 'total_tokens': 944, 'total_time': 0.434922264, 'completion_tokens_details': {'reasoning_tokens': 338}}
+raw content     : {"speech":"Obstacle on left, front is clear about 1.25m ahead.","command":"none"}
+parses as JSON  : yes -> command='none' destination=None
+
+LATENCY VERDICT
+  observed 0.750 s for one turn, timeout 4 s, plan.md:11.5 item 3 target: under 2 s for
+  'speak -> transcript -> Groq reply -> ElevenLabs speaks it'. The LLM call alone is 0.750 s.
+  The TTS call and the buffer-then-play design (ElevenLabsClient.kt:39-50, 78-80) come on top.

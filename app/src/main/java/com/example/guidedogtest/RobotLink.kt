@@ -11,26 +11,15 @@ import androidx.compose.runtime.setValue
  * Values are raw PWM in -255..255 for the two sides: `left` drives the two left motors,
  * `right` the two right motors.
  *
- * What lives here is what the *automatic* driving needs. The manual commands are not here any more:
- * their wheel speeds are editable on the Configure Robot page ([MotorSettings]), because finding the
- * numbers this chassis wants is a job for the floor, not for a source file.
+ * No wheel numbers live here. The speeds this chassis wants are on the Configure Robot page
+ * ([MotorSettings]) and everything that drives reads them there: the manual commands, the route
+ * follower, and the depth-avoidance layer. See [RouteFollower.Config.turnCreepFraction] for how a
+ * route ramps its pivot.
  */
 object Drive {
 
     /** The largest magnitude the firmware accepts on either side. */
     const val MAX_PWM = 255
-
-    /** Left-wheel magnitude for straight driving. */
-    const val SPEED = 180
-
-    /** How much less the right side is commanded to track straight. Re-calibrate here. */
-    const val RIGHT_TRIM = 52
-
-    /**
-     * The follower's in-place rotation comes from the Configure Robot page: it scales the tuned
-     * turn pair for that direction rather than using a constant of its own, so what you tune is
-     * what a route drives. See [RouteFollower.Config.turnCreepFraction] for the ramp.
-     */
 
     /** The frame that releases the motors. */
     const val STOP_FRAME = "c0,0\n"
@@ -84,7 +73,10 @@ class RobotLink(context: Context) {
 
     private val appContext = context.applicationContext
 
-    /** Compose state, written only from the main thread. */
+    /** Where the transports' reader and binder threads hand their results to the main thread. */
+    private val main = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /** Compose state, written only from the main thread - through [main]. */
     var status by mutableStateOf("not connected")
         private set
     var telemetry by mutableStateOf("no telemetry yet")
@@ -136,17 +128,19 @@ class RobotLink(context: Context) {
     }
 
     private fun postStatus(message: String) {
-        status = message
+        main.post { status = message }
     }
 
     private fun postTelemetry(message: String) {
-        telemetry = message
+        main.post { telemetry = message }
     }
 
     private fun postConnected(value: Boolean) {
-        connected = value
-        if (!value && active != null) {
-            status = active?.label?.plus(" disconnected") ?: "disconnected"
+        main.post {
+            connected = value
+            if (!value && active != null) {
+                status = active?.label?.plus(" disconnected") ?: "disconnected"
+            }
         }
     }
 

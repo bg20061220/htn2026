@@ -1,0 +1,232 @@
+
+====================================================================================================
+RouteFollower on the JVM — what it commands, and what reaches the motors
+====================================================================================================
+RouteFollower.kt, MotorSettings.kt and DriveArbiter.kt are the real classes under app/src/main.
+The transmit loop is called as the app calls it (MainActivity.kt:604-609):
+    DriveArbiter.resolve(
+        route = if (following) routeSpeeds else null,
+        manual = motorSettings.speedsFor(command),
+        avoidance = if (avoidanceActive) avoidanceDecision else null,
+    ).frame()
+and the autonomous loop's per-branch routeSpeeds from MainActivity.kt:694-750.
+TICK: one FOLLOW_TICK_MS = 100 ms pass of MainActivity.kt:665-757.
+
+
+====================================================================================================
+CASE 0 — arbitration: what reaches the motors while a route is following
+====================================================================================================
+  the autonomous loop stores the follower's own pair into routeSpeeds:
+  Drive(180,128)           follower frame=c180,128       routeSpeeds=c180,128       transmitted=c180,128
+  Pivot(-154,143)          follower frame=c-154,143      routeSpeeds=c-154,143      transmitted=c-154,143
+  Hold(bad fix)            follower frame=c0,0           routeSpeeds=c0,0           transmitted=c0,0
+  Arrived                  follower frame=c0,0           routeSpeeds=c0,0           transmitted=c0,0
+  CHECK PASS: a clear path sends the follower's own pair, not the controller's cruise
+  CHECK PASS: the controller's corridor steering is laid on the follower's pair
+  CHECK PASS: a drop or a blocked path stops the car even with a route loaded
+  CHECK PASS: a depth feed that went quiet stops the car too - it is not a clear road
+  CHECK PASS: with nobody driving and depth live, the controller drives itself (the AUTO switch)
+  CHECK PASS: with avoidance off, the route or the manual command goes out
+
+====================================================================================================
+CASE (a) — perfect northbound track: the car is on the line, heading 0 deg
+====================================================================================================
+  t=  0.0s  pos=(45.000000,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  0.1s  pos=(45.000000,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  0.2s  pos=(45.000001,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  0.3s  pos=(45.000001,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  0.4s  pos=(45.000002,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  0.5s  pos=(45.000002,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  0.6s  pos=(45.000003,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  0.7s  pos=(45.000003,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  0.8s  pos=(45.000004,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  0.9s  pos=(45.000004,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  1.0s  pos=(45.000004,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  1.1s  pos=(45.000005,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  1.2s  pos=(45.000005,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  1.3s  pos=(45.000006,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  1.4s  pos=(45.000006,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  1.5s  pos=(45.000007,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  1.6s  pos=(45.000007,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  1.7s  pos=(45.000008,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  1.8s  pos=(45.000008,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  1.9s  pos=(45.000009,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  2.0s  pos=(45.000009,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  2.1s  pos=(45.000009,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  2.2s  pos=(45.000010,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  2.3s  pos=(45.000010,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  2.4s  pos=(45.000011,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  2.5s  pos=(45.000011,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  2.6s  pos=(45.000012,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  2.7s  pos=(45.000012,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  2.8s  pos=(45.000013,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  2.9s  pos=(45.000013,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  3.0s  pos=(45.000013,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  3.1s  pos=(45.000014,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  3.2s  pos=(45.000014,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  3.3s  pos=(45.000015,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  3.4s  pos=(45.000015,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  3.5s  pos=(45.000016,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  3.6s  pos=(45.000016,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  3.7s  pos=(45.000017,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  3.8s  pos=(45.000017,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  3.9s  pos=(45.000018,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  4.0s  pos=(45.000018,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  4.1s  pos=(45.000018,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  4.2s  pos=(45.000019,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  4.3s  pos=(45.000019,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  4.4s  pos=(45.000020,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  4.5s  pos=(45.000020,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  4.6s  pos=(45.000021,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  4.7s  pos=(45.000021,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  4.8s  pos=(45.000022,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  4.9s  pos=(45.000022,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  5.0s  pos=(45.000022,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  5.1s  pos=(45.000023,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  5.2s  pos=(45.000023,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  5.3s  pos=(45.000024,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  5.4s  pos=(45.000024,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  5.5s  pos=(45.000025,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  5.6s  pos=(45.000025,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  5.7s  pos=(45.000026,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  5.8s  pos=(45.000026,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  5.9s  pos=(45.000027,-75.000000)  hdg=   0.0  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  summary: index=1 arrived=false aligning=false
+  CHECK PASS: a car already on the line drives instead of pivoting
+
+====================================================================================================
+CASE (b) — 90 deg heading offset: must align first (compass closed loop)
+====================================================================================================
+  t=  0.0s  pos=(45.000000,-75.000000)  hdg=  90.0  Pivot(deg=-90.0, left=-123, right=114)         follower=c-123,114      sent=[desired=PIVOT_LEFT]
+  t=  0.1s  pos=(45.000000,-75.000000)  hdg=  81.0  Pivot(deg=-81.0, left=-123, right=114)         follower=c-123,114      sent=[desired=PIVOT_LEFT]
+  t=  0.2s  pos=(45.000000,-75.000000)  hdg=  72.0  Pivot(deg=-72.0, left=-123, right=114)         follower=c-123,114      sent=[desired=PIVOT_LEFT]
+  t=  0.3s  pos=(45.000000,-75.000000)  hdg=  63.0  Pivot(deg=-63.0, left=-123, right=114)         follower=c-123,114      sent=[desired=PIVOT_LEFT]
+  t=  0.4s  pos=(45.000000,-75.000000)  hdg=  54.0  Pivot(deg=-54.0, left=-123, right=114)         follower=c-123,114      sent=[desired=PIVOT_LEFT]
+  t=  0.5s  pos=(45.000000,-75.000000)  hdg=  45.0  Pivot(deg=-45.0, left=-123, right=114)         follower=c-123,114      sent=[desired=PIVOT_LEFT]
+  t=  0.6s  pos=(45.000000,-75.000000)  hdg=  36.0  Pivot(deg=-36.0, left=-115, right=110)         follower=c-115,110      sent=[desired=PIVOT_LEFT]
+  t=  0.7s  pos=(45.000000,-75.000000)  hdg=  27.0  Pivot(deg=-27.0, left=-110, right=110)         follower=c-110,110      sent=[desired=PIVOT_LEFT]
+  t=  0.8s  pos=(45.000000,-75.000000)  hdg=  18.0  Pivot(deg=-18.0, left=-110, right=110)         follower=c-110,110      sent=[desired=PIVOT_LEFT]
+  t=  0.9s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  1.0s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  1.1s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  1.2s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  1.3s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  1.4s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  1.5s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  1.6s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  1.7s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  1.8s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  1.9s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  2.0s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  2.1s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  2.2s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  2.3s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  2.4s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  2.5s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  2.6s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  2.7s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  2.8s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  2.9s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  3.0s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  3.1s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  3.2s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  3.3s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  3.4s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  3.5s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  3.6s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  3.7s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  3.8s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  t=  3.9s  pos=(45.000000,-75.000000)  hdg=   9.0  Drive(left=170, right=138)                     follower=c170,138       sent=[desired=LEFT]
+  summary: index=0 aligning=false pivotedTicks=9
+  CHECK PASS: a 90 deg error produces Pivot, not Drive
+
+====================================================================================================
+CASE (c) — a fix with accuracyMeters = 45 (RouteFollower.Config.maxAccuracyMeters = 30)
+====================================================================================================
+  t=  0.0s  pos=(45.000000,-75.000000)  hdg=   0.0  Hold(GPS is ±45 m - waiting for a better fix)  follower=c0,0           sent=[desired=STOP]
+  t=  0.1s  pos=(45.000000,-75.000000)  hdg=   0.0  Hold(GPS is ±45 m - waiting for a better fix)  follower=c0,0           sent=[desired=STOP]
+  t=  0.2s  pos=(45.000001,-75.000000)  hdg=   0.0  Hold(GPS is ±45 m - waiting for a better fix)  follower=c0,0           sent=[desired=STOP]
+  t=  0.3s  pos=(45.000001,-75.000000)  hdg=   0.0  Hold(GPS is ±45 m - waiting for a better fix)  follower=c0,0           sent=[desired=STOP]
+  t=  0.4s  pos=(45.000002,-75.000000)  hdg=   0.0  Hold(GPS is ±45 m - waiting for a better fix)  follower=c0,0           sent=[desired=STOP]
+  t=  0.5s  pos=(45.000002,-75.000000)  hdg=   0.0  Hold(GPS is ±45 m - waiting for a better fix)  follower=c0,0           sent=[desired=STOP]
+  t=  0.6s  pos=(45.000003,-75.000000)  hdg=   0.0  Hold(GPS is ±45 m - waiting for a better fix)  follower=c0,0           sent=[desired=STOP]
+  t=  0.7s  pos=(45.000003,-75.000000)  hdg=   0.0  Hold(GPS is ±45 m - waiting for a better fix)  follower=c0,0           sent=[desired=STOP]
+  t=  0.8s  pos=(45.000004,-75.000000)  hdg=   0.0  Hold(GPS is ±45 m - waiting for a better fix)  follower=c0,0           sent=[desired=STOP]
+  t=  0.9s  pos=(45.000004,-75.000000)  hdg=   0.0  Hold(GPS is ±45 m - waiting for a better fix)  follower=c0,0           sent=[desired=STOP]
+  CHECK PASS: a >maxAccuracy fix returns Hold
+  CHECK PASS: Hold -> routeSpeeds = WheelSpeeds(0, 0) (MainActivity.kt:743)
+  CHECK PASS: with avoidanceActive=true and no sight, the Hold's own stop is what reaches the wire
+
+====================================================================================================
+CASE (d) — stalled track: no progress for > 15 s (stuckSeconds = 15)
+====================================================================================================
+  'sent' below is the transmit loop with avoidanceActive=true and depth unavailable: the
+  controller reports STOP: DEPTH UNAVAILABLE, which stops the car, so nothing moves until
+  the depth feed is back (the walker is told, by MainActivity's no-sensing warning):
+  t=  0.0s Drive(left=180, right=128)                     sent=c0,0
+  t=  2.0s Drive(left=180, right=128)                     sent=c0,0
+  t=  4.0s Drive(left=180, right=128)                     sent=c0,0
+  t=  6.0s Drive(left=180, right=128)                     sent=c0,0
+  t=  8.0s Drive(left=180, right=128)                     sent=c0,0
+  t= 10.0s Drive(left=180, right=128)                     sent=c0,0
+  t= 12.0s Drive(left=180, right=128)                     sent=c0,0
+  t= 14.0s Drive(left=180, right=128)                     sent=c0,0
+  t= 15.1s Hold(not making progress toward "Head north 9 m") sent=c0,0
+  first Hold at tick 151 = 15.1 s
+  CHECK PASS: the stuck detector fires after stuckSeconds (15 s), not before
+
+====================================================================================================
+CASE (e) — headingDegrees = null (no compass, no GPS course)
+====================================================================================================
+  t=  0.0s  pos=(45.000000,-75.000000)  hdg=  null  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  0.1s  pos=(45.000000,-75.000000)  hdg=  null  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  0.2s  pos=(45.000000,-75.000000)  hdg=  null  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  0.3s  pos=(45.000000,-75.000000)  hdg=  null  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  t=  0.4s  pos=(45.000000,-75.000000)  hdg=  null  Drive(left=180, right=128)                     follower=c180,128       sent=[desired=FORWARD]
+  CHECK PASS: without a heading the follower drives on the steer loop alone
+  CHECK PASS: and with a null heading the steer term is 0, so it drives the raw tuned forward pair
+
+====================================================================================================
+CASE — MotorTuning.enforceMinimum and the steering correction
+====================================================================================================
+  MotorTuning.MIN_EFFECTIVE_LEFT_POWER=110, MIN_EFFECTIVE_RIGHT_POWER=110 (MotorSettings.kt:14-15)
+  forward pair (MotorSettings.kt:21) = (180, 128); steer clamp = +-60 (RouteFollower.Config.maxSteer)
+
+  steer   raw left/right       after enforceMinimum   note
+   -60     120 /  188             120 /  188           unchanged
+   -30     150 /  158             150 /  158           unchanged
+     0     180 /  128             180 /  128           unchanged
+    30     210 /   98             210 /  110           right lifted 98 -> 110
+    60     240 /   68             240 /  110           right lifted 68 -> 110
+  CHECK PASS: a sub-floor right-wheel correction is raised to the floor (128-60=68 -> 110)
+  CHECK PASS: 0 stays 0, so a released wheel is not lifted
+  CHECK PASS: the pivot creep factor 0.75 of the tuned right pair stays above the floor
+
+====================================================================================================
+CASE — pivot sign convention vs compass (positive = clockwise = right)
+====================================================================================================
+  MotorSettings.kt:22-23: left=(-205,190)  right=(205,-195)
+  RouteFollower.kt:228: val turn = if (error > 0) tuning().right else tuning().left
+  RouteFollower.kt:29-32: 'positive means clockwise, i.e. turn right'
+  heading 330, target 000 -> error 60.0 -> frame c123,-117
+  heading 030, target 000 -> error -60.0 -> frame c-123,114
+  CHECK PASS: positive (clockwise) error commands left>0 / right<0, i.e. the tuned RIGHT pair
+  CHECK PASS: negative (anticlockwise) error commands left<0 / right>0, i.e. the tuned LEFT pair
+  CHECK PASS: the commanded pair is the tuned pair for that direction, at MotorTuning.PIVOT_FRACTION
+  MainActivity.kt maps degrees<0 -> PIVOT_LEFT, else PIVOT_RIGHT, and the depth controller
+  pivots on the same tuned pair the page holds - so both layers turn with one calibration:
+  controller state=TURN_LEFT action='PIVOT LEFT' frame=c-123,114
+  CHECK PASS: the controller pivots on the same gentled pair the follower asks for
+
+====================================================================================================
+CASE — can Hold or Arrived leave the car in motion?
+====================================================================================================
+  CHECK PASS: the route does reach Arrived
+  CHECK PASS: Arrived maps to Drive.STOP_FRAME, so no motion is left behind
+  CHECK PASS: abs(Arrived frame) == 0 on both wheels
+  note: Hold and Arrived both store WheelSpeeds(0, 0) as the route frame, and the arbiter
+  sends it - the follower's frames are what drive the car now (see CASE 0).
+
+====================================================================================================
+RESULT: 0 assertion(s) failed
+====================================================================================================

@@ -1,0 +1,61 @@
+COMMAND: python review/harness/voice_route_check.py
+CAPTURED: 2026-09-20T04:22:41-04:00
+----------------------------------------
+====================================================================================================
+SPOKEN DESTINATION -> WHEELS: the four seams the defect lived in
+====================================================================================================
+  [ok ] RoutesApi.fetchRoute is suspend and switches itself to Dispatchers.IO
+        signature: suspend fun fetchRoute(
+        dispatcher: ): RoutePlan = withContext(Dispatchers.IO) {
+        blocking call inside: val connection = (URL(ENDPOINT).openConnection() as HttpURLConnection).apply {
+        viewModelScope.launch runs on Dispatchers.Main.immediate: the spoken path called this
+        from there, so the dispatcher has to live in here - a plain function compiled fine and
+        threw NetworkOnMainThreadException on the phone.
+  [ok ] no call site wraps fetchRoute in its own dispatcher any more
+        (no withContext(Dispatchers.IO) in MainActivity.kt or ConversationManager.kt)
+  [ok ] the route summary ends by starting the walk itself
+        route loaded: True
+        order after the summary: returnToWakeWordListening() -> onCommand(RobotCommand.Go)
+        wake-word first because ConversationManager.requestSpeech drops a NORMAL announcement
+        while a conversation turn is open (VoicePriority.NORMAL < UNSAFE_PATH): the refusal for
+        a robot that is not connected would otherwise be swallowed after the walker was told
+        the robot is heading somewhere.
+  [ok ] Go is still the one place a route starts, and it still refuses out loud
+        MainActivity.kt Go branch: follower != null && link.connected -> following = true
+        not connected -> "I'm not connected to the robot, so I can't walk there."
+        So the spoken path and a spoken "go" start a walk the same way, and neither can start
+        one the other could not.
+  [ok ] a repeat destination re-emits (requestId) and a swapped route restarts the tick loop
+        VoiceRoute: val requestId: Long,
+        tick loop keys: LaunchedEffect(following, link.connected, follower) {
+        Equal StateFlow values are conflated, so without the id the second "take me to the
+        library" re-adopts nothing; and with `following` already true, a new follower is only
+        picked up if it is a key.
+  [ok ] one fix feeds the voice's origin, GET ROUTE and the map
+        voice origin: locationProvider = { lastLocation?.let { LatLng(it.latitude, it.longitude) }
+        GET ROUTE / map / Places bias: remember(lastLocation?.latitude, lastLocation?.longitude)
+        second copy (`var latitude by remember`): gone
+        The live fix used to exist twice: a Location for the map and follower, and
+        latitude/longitude strings for the voice and GET ROUTE - written only by the continuous
+        callback. A fix that arrived from the one-shot GET CURRENT LOCATION button (the button
+        the app tells people to press) updated the map and left the strings at "Unknown", which
+        is how the walker got "I don't have a location fix yet, so I can't build a route" with a
+        latitude and longitude displayed underneath it.
+  [ok ] the live fixes start when the permission is granted, not only when it predates the launch
+        subscription key: LaunchedEffect(locationPermissionGranted) {
+        The updates used to hang off `LaunchedEffect(Unit)`, so a permission granted after the
+        app was already open never started a fix at all: the app held the grant and no position
+        until it was launched again.
+
+====================================================================================================
+LIVE: one computeRoutes request, body transcribed out of RoutesApi.kt
+====================================================================================================
+endpoint    : https://routes.googleapis.com/directions/v2:computeRoutes
+travelMode  : WALK
+field mask  : routes.legs.steps.navigationInstruction,routes.legs.steps.distanceMeters,routes.legs.steps.endLocation,routes.legs.endLocation,routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline
+api key     : AIzaSy... (MAPS_API_KEY)
+HTTP 200: 3 steps, 771 m, duration 635s
+A real walking route comes back for this key and endpoint, so "no route was found" was
+never the API's answer: it was the catch around a call that never left the main thread.
+====================================================================================================
+All four seams hold in this tree.

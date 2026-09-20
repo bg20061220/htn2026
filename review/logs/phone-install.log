@@ -1,0 +1,55 @@
+PHONE BUILD & INSTALL — capture log
+====================================================================================================
+
+DEVICE
+  adb serial        : R5CRC2DY37K
+  model             : SM_G991W (Galaxy S21 5G, o1q)
+  transport         : USB, state "device" (authorized)
+  display           : 1080x2400 physical, landscape while the app is up
+
+APK
+  path              : app/build/outputs/apk/debug/app-debug.apk
+  size              : 99,949,024 bytes
+  sha256            : 633634c5ff66c2c9fbe22b2288f01806ceb02d73b8796ef1c7d74a163e168793
+  built by          : ./gradlew.bat :app:assembleDebug   (BUILD SUCCESSFUL, 38 tasks)
+
+INSTALL
+  1. adb install -r -t app-debug.apk
+     -> FAILURE [INSTALL_FAILED_UPDATE_INCOMPATIBLE: Existing package
+        com.example.guidedogtest signatures do not match newer version]
+     The copy already on the phone was built with a DIFFERENT debug keystore
+     (~/.android/debug.keystore is per machine), so it cannot be updated in place.
+  2. Checked for app-owned data before removing it:
+       adb shell run-as com.example.guidedogtest ls shared_prefs
+     -> only com.google.* (Maps/MLKit/geo SDK) and settings_preference.xml; there was NO
+        motor-settings.xml, i.e. this phone had never saved any tuning. Nothing to lose.
+  3. adb uninstall com.example.guidedogtest   -> Success
+  4. adb install -r app-debug.apk             -> Success   (15.6 s, streamed)
+  Note for the team: installing from a different laptop hits the same conflict. Either
+  uninstall first, or keep one machine as the one that installs.
+
+SMOKE TEST ON THE DEVICE (no robot attached)
+  launch            : monkey -p com.example.guidedogtest -c android.intent.category.LAUNCHER
+  resumed activity  : com.example.guidedogtest/.MainActivity  (topResumedActivity, mFocusedApp)
+  crashes           : none — no FATAL EXCEPTION in the whole session
+  controls screen   : renders — map (world view, no permission yet), "Mic permission not granted"
+                      + ENABLE VOICE ASSISTANT, "ARCore: Not checked", "ESP32: not connected",
+                      "Robot: no telemetry yet", CONNECT ROBOT
+                      -> review/logs/phone-controls-screen.png
+  configure page    : opens and renders the calibration — Command/Left/Right PWM = 180/128 and the
+                      live compass: raw phone heading W 251 deg, robot heading N 341 deg,
+                      mounting offset +90 deg (341 - 251 = 90, the landscape correction, on real
+                      sensors)
+                      -> review/logs/phone-configure-robot.png
+  persistence       : typed 181 into Left PWM -> shared_prefs/motor-settings.xml immediately shows
+                      forward.left=181 (save-as-you-type works). Restored to 180, force-stopped,
+                      relaunched, reopened the page -> shows 180 (load works across a cold start).
+                      Final stored state: forward 180/128, left -205/190, right 205/-195.
+
+STILL NEEDS THE CAR (nothing here was verified with motors or a link)
+  - the USB / BLE link to the ESP32, and whether CONNECT ROBOT finds it
+  - motors turning at all, and the tuned pairs on the floor
+  - the depth camera: CHECK ARCORE, CAMERA VIEW, hallway centring, the AUTO switch
+  - voice: mic permission, "goose ..." wake word, stop word, Groq/ElevenLabs round trip
+  - the firmware's 500 ms deadman under a real unplug
+====================================================================================================

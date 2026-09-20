@@ -1,0 +1,2 @@
+633634c5ff66c2c9fbe22b2288f01806ceb02d73b8796ef1c7d74a163e168793  app/build/outputs/apk/debug/app-debug.apk
+-rwxrwxrwx 1 somebody somegroup 99949024 Sep 20 03:09 app/build/outputs/apk/debug/app-debug.apk

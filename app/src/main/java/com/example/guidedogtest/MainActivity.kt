@@ -37,13 +37,16 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import com.example.guidedogtest.ocr.OcrScreen
 import com.example.guidedogtest.ocr.DesiredTravelDirection
+import com.example.guidedogtest.ocr.AvoidanceDecision
 import com.example.guidedogtest.ocr.AvoidanceState
+import com.example.guidedogtest.ocr.AvoidanceStop
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.example.guidedogtest.ui.theme.GuideDogTestTheme
 import com.example.guidedogtest.voice.ConversationManager
 import com.example.guidedogtest.voice.RobotCommand
+import com.example.guidedogtest.voice.SensorSnapshot
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.maps.CameraUpdateFactory
@@ -64,10 +67,11 @@ import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.ar.core.Session
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
 import com.google.maps.android.compose.Circle
 import com.google.maps.android.compose.GoogleMap
@@ -138,19 +142,41 @@ fun NavigationScreen() {
     var routeMessage by remember { mutableStateOf<String?>(null) }
     var routeLoading by remember { mutableStateOf(false) }
     var command by remember { mutableStateOf("STOP") }
+    // The spoken turn that is currently running, so a second one replaces it rather than stacking.
+    var turnIntentJob by remember { mutableStateOf<Job?>(null) }
+
     // Something the UI needs said but cannot speak where it decides it: the voice assistant's
     // onCommand lambda is constructed *by* the call that creates the manager, so it cannot call it.
     // Corrections are queued here and spoken by the effect that drains it.
     var pendingAnnouncement by remember { mutableStateOf<String?>(null) }
     var showCameraView by remember { mutableStateOf(false) }
 
-    // Live position, so the follower never works from a stale fix.
+    // Live position, and the only copy of it: see [currentLocation]. The follower reads it every tick
+    // so it never works from a stale fix, and the voice and the map read the same object.
     var lastLocation by remember { mutableStateOf<Location?>(null) }
 
-    // The same fix as text, for the map and voice code that reads it that way. Kept in step with
-    // every live update, so it is never the stale one-shot value it used to be.
-    var latitude by remember { mutableStateOf("Unknown") }
-    var longitude by remember { mutableStateOf("Unknown") }
+    // Whether fine location is allowed. The live updates hang off this rather than off app startup, so
+    // a grant that arrives later - which is exactly what the GET CURRENT LOCATION button is for -
+    // starts the fixes instead of leaving the app holding a permission and no position until the next
+    // launch.
+    var locationPermissionGranted by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+
+    /** One fix now: a pressed button expects a position this second, not at the next tick. */
+    fun requestOneShotFix() {
+        fusedLocationClient.getCurrentLocation(
+            Priority.PRIORITY_HIGH_ACCURACY,
+            CancellationTokenSource().token
+        ).addOnSuccessListener { location ->
+            if (location != null) lastLocation = location
+        }
+    }
 
     // Which screen is up. The map is a view of the same session, not a second session.
     var screen by remember { mutableStateOf(Screen.Controls) }
@@ -168,13 +194,20 @@ fun NavigationScreen() {
     var follower by remember { mutableStateOf<RouteFollower?>(null) }
     var following by remember { mutableStateOf(false) }
 
-    // When this is set it wins over the manual command: that is what makes the robot autonomous.
-    var autonomousFrame by remember { mutableStateOf<String?>(null) }
+    // The three things that can drive the car. What is in force on a given tick is decided in one
+    // place - [DriveArbiter] - so a route cannot be steered by one subsystem and stopped by another
+    // without either of them knowing.
+    var routeSpeeds by remember { mutableStateOf<WheelSpeeds?>(null) }
     var avoidanceActive by remember { mutableStateOf(false) }
-    var avoidanceFrame by remember { mutableStateOf(Drive.STOP_FRAME) }
+    var avoidanceDecision by remember {
+        mutableStateOf(AvoidanceDecision(AvoidanceState.IDLE, WheelSpeeds(0, 0), "AUTO OFF"))
+    }
     var emergencyStopSignal by remember { mutableStateOf(0L) }
     var desiredRouteDirection by remember { mutableStateOf(DesiredTravelDirection.STOP) }
-    var localAvoidanceState by remember { mutableStateOf(AvoidanceState.STOPPED) }
+
+    // What the depth scene says about hazards right now, for the conversation: the model is told
+    // what the robot can actually see, instead of a constant it will read back as "all clear".
+    var sensorSnapshot by remember { mutableStateOf(SensorSnapshot()) }
 
     val scrollState = rememberScrollState()
 
@@ -214,7 +247,7 @@ fun NavigationScreen() {
 
     fun stopFollowing() {
         following = false
-        autonomousFrame = null
+        routeSpeeds = null
         desiredRouteDirection = DesiredTravelDirection.STOP
     }
 
@@ -224,11 +257,11 @@ fun NavigationScreen() {
      * from one place and be forgotten in another.
      */
     fun halt(sayIt: Boolean = true) {
+        turnIntentJob?.cancel()
         stopFollowing()
         avoidanceActive = false
-        avoidanceFrame = Drive.STOP_FRAME
+        avoidanceDecision = AvoidanceDecision(AvoidanceState.IDLE, WheelSpeeds(0, 0), "AUTO OFF")
         command = "STOP"
-        autonomousFrame = Drive.STOP_FRAME
         routeStatus = "stopped"
         emergencyStopSignal++
         link.send(Drive.STOP_FRAME)
@@ -238,7 +271,6 @@ fun NavigationScreen() {
     fun manualDrive(next: String) {
         stopFollowing()
         avoidanceActive = false
-        avoidanceFrame = Drive.STOP_FRAME
         command = next
     }
 
@@ -285,15 +317,20 @@ fun NavigationScreen() {
                     context = context.applicationContext,
                     groqApiKey = BuildConfig.GROQ_API_KEY,
                     elevenLabsApiKey = BuildConfig.ELEVENLABS_API_KEY,
+                    // The live fix, from wherever it arrived - the continuous subscription or the
+                    // one-shot button. Same object the map, the follower and GET ROUTE use, so the
+                    // assistant cannot have a position the screen does not.
                     locationProvider = {
-                        val lat = latitude.toDoubleOrNull()
-                        val lng = longitude.toDoubleOrNull()
-                        if (lat != null && lng != null) LatLng(lat, lng) else null
+                        lastLocation?.let { LatLng(it.latitude, it.longitude) }
                     },
+                    // The depth scene, not a constant: this is what lets the assistant say there is
+                    // something on the left without inventing it.
+                    sensorProvider = { sensorSnapshot },
                     onCommand = { robotCommand ->
-                        // Voice commands go through exactly the same path as the manual buttons:
-                        // they take the motors back from the follower and set the command the
-                        // transmit loop sends. Nothing about voice reaches the car another way.
+                        // The motors are already the depth layer's or the follower's by the time this
+                        // runs; what voice does here is hand the intent over and make it visible -
+                        // a stop, a route to follow, a spoken turn or "go forward" for the depth
+                        // layer to execute. Nothing about voice writes a wheel frame on its own.
                         when (robotCommand) {
                             RobotCommand.Stop -> halt(sayIt = false)
 
@@ -302,7 +339,7 @@ fun NavigationScreen() {
                                 // voice has just talked the walker through it and they have said yes.
                                 if (follower != null && link.connected) {
                                     command = "STOP"
-                                    autonomousFrame = Drive.STOP_FRAME
+                                    routeSpeeds = null
                                     desiredRouteDirection = DesiredTravelDirection.STOP
                                     avoidanceActive = true
                                     showCameraView = true
@@ -325,25 +362,67 @@ fun NavigationScreen() {
                                 }
                             }
 
+                            // Spoken motion goes through the depth layer, not the manual latch: the
+                            // person saying it cannot see the car, so the same obstacle sensing that
+                            // guards a route has to guard a spoken turn. The page's buttons stay the
+                            // unguarded bench path.
                             is RobotCommand.Turn -> {
+                                val left = robotCommand.direction.lowercase().contains("left")
                                 stopFollowing()
-                                avoidanceActive = false
-                                command = if (robotCommand.direction.lowercase().contains("left")) {
-                                    "LEFT"
+                                command = "STOP"
+                                routeSpeeds = null
+                                desiredRouteDirection = if (left) {
+                                    DesiredTravelDirection.PIVOT_LEFT
                                 } else {
-                                    "RIGHT"
+                                    DesiredTravelDirection.PIVOT_RIGHT
+                                }
+                                avoidanceActive = true
+                                showCameraView = true
+                                Log.d(
+                                    TAG_MAIN,
+                                    "Voice turn ${robotCommand.direction} -> depth pivot for " +
+                                        "${VOICE_TURN_MS} ms",
+                                )
+                                // A turn is a moment, not a mode. This request used to be the last
+                                // word forever: the intent sat in `desiredRouteDirection`, and a clear
+                                // middle never got to drive again because a pivot was still being
+                                // asked for. It now expires, and the boxes take it from there.
+                                turnIntentJob?.cancel()
+                                turnIntentJob = coroutineScope.launch {
+                                    delay(VOICE_TURN_MS)
+                                    if (desiredRouteDirection == DesiredTravelDirection.PIVOT_LEFT ||
+                                        desiredRouteDirection == DesiredTravelDirection.PIVOT_RIGHT
+                                    ) {
+                                        desiredRouteDirection = DesiredTravelDirection.FORWARD
+                                        Log.d(TAG_MAIN, "Voice turn finished -> forward")
+                                    }
                                 }
                             }
 
-                            // Straight ahead, on the tuned FORWARD pair. No destination needed, so
-                            // this is the one that works on the bench with no route loaded.
+                            // Straight ahead, with the depth layer watching: no destination needed,
+                            // so this is the one that works with no route loaded.
                             RobotCommand.Forward -> {
                                 stopFollowing()
-                                command = "FORWARD"
+                                command = "STOP"
+                                routeSpeeds = null
+                                desiredRouteDirection = DesiredTravelDirection.FORWARD
+                                avoidanceActive = true
+                                showCameraView = true
                             }
 
-                            // The route for a spoken destination arrives on voiceRoute; the
-                            // effect below turns it into the follower's route.
+                            // The depth camera only measures the forward corridor, so a reverse
+                            // command cannot be checked against anything. Refusing it and saying so
+                            // is the only honest answer.
+                            RobotCommand.Backward -> {
+                                halt(sayIt = false)
+                                pendingAnnouncement =
+                                    "I can't move backward safely without rear depth."
+                            }
+
+                            // A navigate never arrives here: ConversationManager resolves the place,
+                            // loads the route onto voiceRoute (the effect below adopts it) and starts
+                            // the walk itself once the route is loaded. The branch exists because the
+                            // command still has to be handled somewhere.
                             is RobotCommand.Navigate -> Unit
 
                             RobotCommand.None -> Unit
@@ -362,9 +441,9 @@ fun NavigationScreen() {
     val lastSpoken by conversationManager.lastSpoken.collectAsState()
     val voiceRoute by conversationManager.voiceRoute.collectAsState()
 
-    // A destination spoken to the robot becomes the route the robot drives, so "go" afterwards
-    // leads along exactly the walk the voice just described. One effect: the map state and the
-    // follower come from the same plan.
+    // A destination spoken to the robot becomes the route the robot drives. One effect: the map
+    // state and the follower come from the same plan, and the same plan is what the Go that follows
+    // the route summary hands to the motors - so the walk the voice described is the walk that runs.
     LaunchedEffect(voiceRoute) {
         voiceRoute?.let { spoken ->
             destination = spoken.destinationName
@@ -394,14 +473,21 @@ fun NavigationScreen() {
         }
     }
 
-    val currentLocation = remember(latitude, longitude) {
-        val lat = latitude.toDoubleOrNull()
-        val lng = longitude.toDoubleOrNull()
-        if (lat != null && lng != null && lat in -90.0..90.0 && lng in -180.0..180.0) {
-            LatLng(lat, lng)
-        } else {
-            null
-        }
+    /**
+     * Where the robot is, for everything that needs a point: the map marker, the Places bias, GET
+     * ROUTE, and the assistant's route origin.
+     *
+     * Derived from [lastLocation] instead of from a copy of it. A second, string-shaped copy used to
+     * sit here, written only by the continuous location callback - so a fix that arrived through the
+     * one-shot GET CURRENT LOCATION path (the button the app tells people to press) updated the map
+     * and left the strings at "Unknown", and the assistant answered a confirmed destination with
+     * "I don't have a location fix yet, so I can't build a route" while the screen was showing a
+     * latitude and a longitude underneath it.
+     */
+    val currentLocation = remember(lastLocation?.latitude, lastLocation?.longitude) {
+        lastLocation
+            ?.takeIf { it.latitude in -90.0..90.0 && it.longitude in -180.0..180.0 }
+            ?.let { LatLng(it.latitude, it.longitude) }
     }
     val fallbackLocation = remember { LatLng(0.0, 0.0) }
     val cameraPositionState = rememberCameraPositionState {
@@ -512,27 +598,11 @@ fun NavigationScreen() {
         rememberLauncherForActivityResult(
             ActivityResultContracts.RequestPermission()
         ) { granted ->
-
-            if (granted) {
-
-                if (
-                    ContextCompat.checkSelfPermission(
-                        context,
-                        Manifest.permission.ACCESS_FINE_LOCATION
-                    ) == PackageManager.PERMISSION_GRANTED
-                ) {
-
-                    fusedLocationClient.getCurrentLocation(
-                        Priority.PRIORITY_HIGH_ACCURACY,
-                        CancellationTokenSource().token
-                    ).addOnSuccessListener { location ->
-
-                        if (location != null) {
-                            lastLocation = location
-                        }
-                    }
-                }
-            }
+            locationPermissionGranted = granted
+            // A fix now, and the subscription below takes over from here: the grant is what the
+            // update effect is keyed on, so a permission granted at this moment starts the live
+            // position instead of waiting for the next launch.
+            if (granted) requestOneShotFix()
         }
 
     // CAMERA PERMISSION
@@ -581,31 +651,42 @@ fun NavigationScreen() {
         }
     }
 
-    // Keeps the ESP32 fed: the frame currently in force at 20 Hz, plus the heartbeat the
-    // firmware needs to keep the motors turning. If this loop stops - app killed, link
-    // dropped, screen closed - the firmware stops the car on its own after 500 ms.
+    // What keeps the ESP32 fed. Three things can drive this car and they answer different questions:
+    // the route follower (the tuned pair, steering on the bearing), the manual or spoken command, and
+    // the depth boxes (obstacles). [DriveArbiter] is the single place their precedence lives: a
+    // refusal from the depth layer stops the car, a pivot it needs is its own pair, and otherwise the
+    // driving pair goes out with its lateral steering laid on as a bias.
     //
-    // The frame is whatever is in force: the route follower's when it is driving, otherwise the
-    // manual command. One writer, one path to the motors.
+    // The decision in force, as a frame. Everything that can drive the car is read here - the route,
+    // the human, the depth boxes - so there is exactly one place a wheel frame is composed.
+    val resolvedFrame = snapshotFlow {
+        DriveArbiter.resolve(
+            route = if (following) routeSpeeds else null,
+            manual = motorSettings.speedsFor(command),
+            avoidance = if (avoidanceActive) avoidanceDecision else null,
+        ).frame()
+    }
+
+    // One writer, and it does not poll: the frame is sent the moment the decision changes (a new
+    // depth frame, a route step, a spoken command), and re-sent with the heartbeat otherwise. That
+    // took the wait for the next tick out of the reaction time - it used to be up to 50 ms while
+    // driving and 200 ms while the microphone was live, on top of the vision latency.
     LaunchedEffect(link.connected) {
-
-        var tick = 0
-
+        if (!link.connected) return@LaunchedEffect
+        var sent: String? = null
         while (link.connected) {
-
-            val frame = when {
-                avoidanceActive -> avoidanceFrame
-                autonomousFrame != null -> autonomousFrame!!
-                else -> motorSettings.speedsFor(command).frame()
+            val frame = resolvedFrame.first()
+            if (frame != sent) {
+                Log.d(
+                    TAG_MAIN,
+                    "Sending motor frame: ${frame.trim()} (command=$command, following=$following)",
+                )
+                sent = frame
             }
             link.send(frame)
-
-            if (tick % 4 == 0) {
-                link.send("h500\n")
-            }
-
-            tick++
-            delay(50)
+            link.send(HEARTBEAT_FRAME)
+            // Wake the moment the decision changes, or keep the firmware fed at 5 Hz.
+            withTimeoutOrNull(HEARTBEAT_MS) { resolvedFrame.first { it != frame } }
         }
     }
 
@@ -615,8 +696,6 @@ fun NavigationScreen() {
             override fun onLocationResult(result: LocationResult) {
                 result.lastLocation?.let {
                     lastLocation = it
-                    latitude = it.latitude.toString()
-                    longitude = it.longitude.toString()
                     // Magnetic north is not true north; the compass needs a fix to correct itself.
                     headingSource.setLocation(it.latitude, it.longitude)
                 }
@@ -624,23 +703,17 @@ fun NavigationScreen() {
         }
     }
 
-    LaunchedEffect(Unit) {
-        if (
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ) == PackageManager.PERMISSION_GRANTED
-        ) {
-            val request =
-                LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L)
-                    .setMinUpdateIntervalMillis(500L)
-                    .build()
-            fusedLocationClient.requestLocationUpdates(
-                request,
-                locationCallback,
-                Looper.getMainLooper()
-            )
-        }
+    LaunchedEffect(locationPermissionGranted) {
+        if (!locationPermissionGranted) return@LaunchedEffect
+        val request =
+            LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L)
+                .setMinUpdateIntervalMillis(500L)
+                .build()
+        fusedLocationClient.requestLocationUpdates(
+            request,
+            locationCallback,
+            Looper.getMainLooper()
+        )
     }
 
     DisposableEffect(Unit) {
@@ -654,11 +727,17 @@ fun NavigationScreen() {
     }
 
     // The autonomous loop: one decision per tick, handed to the transmit loop above.
-    LaunchedEffect(following, link.connected) {
+    //
+    // The follower is a key, not just a read: a spoken destination confirmed mid-walk swaps the
+    // route under a loop that is already running, and `following` never changes state - so without
+    // this the robot would keep driving the plan that was just replaced, and the new one would only
+    // ever be adopted by the map. Restarting also resets the announced-step marker, so the first cue
+    // of the new route is spoken rather than assumed.
+    LaunchedEffect(following, link.connected, follower) {
 
         val active = follower
         if (!following || !link.connected || active == null) {
-            autonomousFrame = null
+            routeSpeeds = null
             return@LaunchedEffect
         }
 
@@ -684,7 +763,7 @@ fun NavigationScreen() {
 
             if (location == null) {
                 desiredRouteDirection = DesiredTravelDirection.STOP
-                autonomousFrame = Drive.STOP_FRAME
+                routeSpeeds = WheelSpeeds(0, 0)
                 routeStatus = "waiting for a GPS fix"
             } else {
                 val fix =
@@ -697,9 +776,9 @@ fun NavigationScreen() {
                         headingDegrees = headingSource.headingDegrees ?: gpsCourse(location),
                     )
 
-                val progressDt = if (localAvoidanceState == AvoidanceState.FORWARD ||
-                    localAvoidanceState == AvoidanceState.SLOW) FOLLOW_TICK_MS / 1000.0 else 0.0
-                when (val decision = active.update(fix, progressDt)) {
+                // Wall time, not vision time: a car pinned against something has to trip the
+                // follower's stuck check even while the avoidance layer is pivoting.
+                when (val decision = active.update(fix, FOLLOW_TICK_MS / 1000.0)) {
 
                     is Command.Pivot -> {
                         desiredRouteDirection = if (decision.degrees < 0) {
@@ -707,7 +786,10 @@ fun NavigationScreen() {
                         } else {
                             DesiredTravelDirection.PIVOT_RIGHT
                         }
-                        autonomousFrame = Drive.STOP_FRAME
+                        // The follower's own pair for that direction, ramped as it closes on the
+                        // bearing: this is the frame the transmit loop sends while the avoidance
+                        // layer is only driving straight on.
+                        routeSpeeds = WheelSpeeds(decision.left, decision.right)
                         routeStatus =
                             "turning ${if (decision.degrees < 0) "left" else "right"} " +
                                 "${abs(decision.degrees).toInt()}°"
@@ -722,20 +804,20 @@ fun NavigationScreen() {
                             routeHeadingError < -ROUTE_DIRECTION_ERROR_DEGREES -> DesiredTravelDirection.LEFT
                             else -> DesiredTravelDirection.FORWARD
                         }
-                        autonomousFrame = Drive.STOP_FRAME
+                        routeSpeeds = WheelSpeeds(decision.left, decision.right)
                         routeStatus =
                             "${active.progressLabel()}: ${active.currentStep?.instruction ?: ""}"
                     }
 
                     is Command.Hold -> {
                         desiredRouteDirection = DesiredTravelDirection.STOP
-                        autonomousFrame = Drive.STOP_FRAME
+                        routeSpeeds = WheelSpeeds(0, 0)
                         routeStatus = decision.reason
                     }
 
                     Command.Arrived -> {
                         desiredRouteDirection = DesiredTravelDirection.STOP
-                        autonomousFrame = Drive.STOP_FRAME
+                        routeSpeeds = WheelSpeeds(0, 0)
                         routeStatus = "arrived"
                         following = false
                     }
@@ -745,8 +827,33 @@ fun NavigationScreen() {
             delay(FOLLOW_TICK_MS)
         }
 
-        autonomousFrame = Drive.STOP_FRAME
+        routeSpeeds = null
         desiredRouteDirection = DesiredTravelDirection.STOP
+    }
+
+    /**
+     * True while a walk is under way with nothing able to see the path: the firmware's sonar is
+     * switched off and no ToF is fitted, so the ARCore depth feed is the robot's only obstacle sense.
+     */
+    val obstacleSensingLost = avoidanceActive &&
+        avoidanceDecision.stopReason == AvoidanceStop.SENSING_UNAVAILABLE
+
+    // Losing the only sense the robot has is not something to discover on a leash. It is said out
+    // loud once per walk - after a grace period, because the camera session needs a moment to prove
+    // itself - and it stays on the screen for whoever is walking beside the robot.
+    var noSensingWarned by remember { mutableStateOf(false) }
+    LaunchedEffect(obstacleSensingLost) {
+        if (!obstacleSensingLost) {
+            noSensingWarned = false
+            return@LaunchedEffect
+        }
+        delay(NO_OBSTACLE_SENSING_GRACE_MS)
+        if (!noSensingWarned) {
+            noSensingWarned = true
+            conversationManager.announce(
+                "I can't see what's ahead, so I've stopped until the camera comes back."
+            )
+        }
     }
 
     // Leaving the screen must never leave the car rolling.
@@ -762,14 +869,7 @@ fun NavigationScreen() {
                 MotorSettingsStore.save(context, it)
             },
             command = command,
-            onCommand = {
-                stopFollowing()
-                if (it == "STOP") {
-                    avoidanceActive = false
-                    avoidanceFrame = Drive.STOP_FRAME
-                }
-                command = it
-            },
+            onCommand = { manualDrive(it) },
             rawHeading = headingSource.rawHeadingDegrees,
             robotHeading = headingSource.headingDegrees,
             offsetDegrees = headingSource.offsetDegrees,
@@ -942,7 +1042,6 @@ fun NavigationScreen() {
                     if (enabled) {
                         stopFollowing()
                         command = "STOP"
-                        avoidanceFrame = Drive.STOP_FRAME
                         avoidanceActive = true
                         showCameraView = true
                     } else {
@@ -967,26 +1066,9 @@ fun NavigationScreen() {
 
         Button(
             onClick = {
-
-                if (
-                    ContextCompat.checkSelfPermission(
-                        context,
-                        Manifest.permission.ACCESS_FINE_LOCATION
-                    ) == PackageManager.PERMISSION_GRANTED
-                ) {
-
-                    fusedLocationClient.getCurrentLocation(
-                        Priority.PRIORITY_HIGH_ACCURACY,
-                        CancellationTokenSource().token
-                    ).addOnSuccessListener { location ->
-
-                        if (location != null) {
-                            lastLocation = location
-                        }
-                    }
-
+                if (locationPermissionGranted) {
+                    requestOneShotFix()
                 } else {
-
                     locationPermissionLauncher.launch(
                         Manifest.permission.ACCESS_FINE_LOCATION
                     )
@@ -1034,10 +1116,9 @@ fun NavigationScreen() {
                             routeSteps = emptyList()
                             follower = null
                             following = false
-                            autonomousFrame = null
+                            routeSpeeds = null
                             desiredRouteDirection = DesiredTravelDirection.STOP
                             avoidanceActive = false
-                            avoidanceFrame = Drive.STOP_FRAME
                             command = "STOP"
                             link.send(Drive.STOP_FRAME)
                             destinationFocused = true
@@ -1131,13 +1212,13 @@ fun NavigationScreen() {
 
                 coroutineScope.launch {
                     try {
-                        val plan = withContext(Dispatchers.IO) {
-                            RoutesApi.fetchRoute(
-                                apiKey = key,
-                                origin = GeoPoint(origin.latitude, origin.longitude),
-                                destination = target,
-                            )
-                        }
+                        // The dispatcher lives inside fetchRoute: one place to get right, for the
+                        // voice path that used to miss it as well as this button.
+                        val plan = RoutesApi.fetchRoute(
+                            apiKey = key,
+                            origin = GeoPoint(origin.latitude, origin.longitude),
+                            destination = target,
+                        )
                         adoptRoute(plan, label)
                     } catch (error: Exception) {
                         routePoints = emptyList()
@@ -1208,6 +1289,14 @@ fun NavigationScreen() {
 
         Text("Route: $routeStatus")
 
+        if (obstacleSensingLost) {
+            Text(
+                text = "Obstacle detection is OFF - nothing is seeing the path, so the robot is " +
+                    "standing still. Turn the camera view on or drive it manually.",
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+
         follower?.currentStep?.let { step ->
             Text("Now: ${step.instruction} (${step.distanceMeters} m)")
         }
@@ -1238,7 +1327,7 @@ fun NavigationScreen() {
                 // Hand the motors over to the follower; the manual command goes neutral.
                 command = "STOP"
                 avoidanceActive = true
-                autonomousFrame = Drive.STOP_FRAME
+                routeSpeeds = null
                 desiredRouteDirection = DesiredTravelDirection.STOP
                 showCameraView = true
                 following = true
@@ -1281,7 +1370,7 @@ fun NavigationScreen() {
 
     fun closeCameraView() {
         avoidanceActive = false
-        avoidanceFrame = Drive.STOP_FRAME
+        sensorSnapshot = SensorSnapshot()
         stopFollowing()
         command = "STOP"
         link.send(Drive.STOP_FRAME)
@@ -1298,26 +1387,28 @@ fun NavigationScreen() {
                 speakObstacleAlert = conversationManager::speakObstacleAlert,
                 speakAvoidanceAlert = conversationManager::speakAvoidanceAlert,
                 robotConnected = link.connected,
+                motorSettings = motorSettings,
                 initialAutonomousEnabled = avoidanceActive,
                 routeNavigationActive = following,
                 desiredRouteDirection = desiredRouteDirection,
                 emergencyStopSignal = emergencyStopSignal,
                 onAutonomousAvoidanceEnabled = { enabled ->
                     avoidanceActive = enabled
-                    avoidanceFrame = Drive.STOP_FRAME
                     if (enabled) {
                         command = "STOP"
-                    } else if (following) {
-                        stopFollowing()
-                        command = "STOP"
-                        autonomousFrame = Drive.STOP_FRAME
-                        link.send(Drive.STOP_FRAME)
+                    } else {
+                        // Nothing is looking at the path any more, so the hazard picture the
+                        // conversation reads is emptied rather than left at its last value.
+                        sensorSnapshot = SensorSnapshot()
+                        if (following) {
+                            stopFollowing()
+                            command = "STOP"
+                            link.send(Drive.STOP_FRAME)
+                        }
                     }
                 },
-                onAutonomousFrame = { frame ->
-                    avoidanceFrame = frame ?: Drive.STOP_FRAME
-                },
-                onAvoidanceDecision = { localAvoidanceState = it.state },
+                onAvoidanceDecision = { avoidanceDecision = it },
+                onSceneSnapshot = { sensorSnapshot = it },
             )
         }
     }
@@ -1373,6 +1464,26 @@ private fun RobotMapPane(
 /** One decision per tick for the route follower. */
 private const val FOLLOW_TICK_MS = 100L
 private const val ROUTE_DIRECTION_ERROR_DEGREES = 5.0
+
+/** How long the depth feed has to prove itself before its absence is spoken about. */
+private const val NO_OBSTACLE_SENSING_GRACE_MS = 2_500L
+
+/**
+ * How often the frame and heartbeat are re-sent when nothing has changed: 5 Hz, well inside the
+ * firmware's 500 ms cutoff. A *change* is sent immediately, so this is only the keep-alive.
+ */
+private const val HEARTBEAT_MS = 200L
+
+/**
+ * How long a spoken "turn left/right" pivots for before the robot goes back to driving on what the
+ * boxes say. A quarter turn at the tuned pivot pair; say it again to turn further.
+ */
+private const val VOICE_TURN_MS = 1_200L
+
+/** What the firmware reads as "the phone is still here": 500 ms of silence stops the motors. */
+private const val HEARTBEAT_FRAME = "h500\n"
+
+private const val TAG_MAIN = "MainActivity"
 
 /** The screens: the controls, the live map, and the manual drive tuning page. */
 private enum class Screen { Controls, ConfigureRobot }

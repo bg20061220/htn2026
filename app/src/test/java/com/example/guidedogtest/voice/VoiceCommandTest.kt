@@ -28,9 +28,22 @@ class VoiceCommandTest {
         // "go" starts following a planned route; "forward" drives without one.
         assertEquals(RobotCommand.Go, localCommandFor("go"))
         assertEquals(RobotCommand.Go, localCommandFor("start following"))
+        assertEquals(RobotCommand.Go, localCommandFor("continue"))
+        assertEquals(RobotCommand.Go, localCommandFor("keep going"))
         assertEquals(RobotCommand.Forward, localCommandFor("go forward"))
         assertEquals(RobotCommand.Forward, localCommandFor("forward"))
+        assertEquals(RobotCommand.Forward, localCommandFor("move forward"))
         assertEquals(RobotCommand.Forward, localCommandFor("straight ahead"))
+    }
+
+    @Test
+    fun backwardsIsRecognisedSoItCanBeRefused() {
+        // The robot has no rear depth, so this command is answered with a refusal rather than
+        // motion - but it has to be understood for the refusal to be possible.
+        assertEquals(RobotCommand.Backward, localCommandFor("backward"))
+        assertEquals(RobotCommand.Backward, localCommandFor("go backward"))
+        assertEquals(RobotCommand.Backward, localCommandFor("back"))
+        assertEquals(RobotCommand.Backward, localCommandFor("reverse"))
     }
 
     @Test
@@ -48,6 +61,29 @@ class VoiceCommandTest {
     }
 
     @Test
+    fun aCommandSaidWithTheWakeWordIsExtractedFromIt() {
+        assertEquals("stop", commandAfterWakeWord("Hey Goose, stop"))
+        assertEquals("take me to the library", commandAfterWakeWord("Goose take me to the library"))
+        assertEquals("", commandAfterWakeWord("hey goose"))
+        assertEquals("", commandAfterWakeWord("hello there"))
+        // Case and trailing punctuation are the recognizer's business, and localCommandFor normalises
+        // both - so what matters is that the phrase survives the round trip, not its exact spelling.
+        assertEquals("Turn left.", commandAfterWakeWord("Goose. Turn left."))
+        assertEquals(RobotCommand.Turn("left"), localCommandFor(commandAfterWakeWord("Goose. Turn left.")))
+        assertEquals(RobotCommand.Stop, localCommandFor(commandAfterWakeWord("Goose, stop!")))
+    }
+
+    @Test
+    fun aSpokenDestinationIsExtractedForTheFastPath() {
+        assertEquals("the library", destinationRequestFor("take me to the library"))
+        assertEquals("200 University Avenue", destinationRequestFor("go to 200 University Avenue"))
+        assertEquals("Room 204", destinationRequestFor("take me to Room 204?"))
+        // Only the fixed phrasings; anything else is the model's job.
+        assertNull(destinationRequestFor("tell me about Room 204"))
+        assertNull(destinationRequestFor("take me to"))
+    }
+
+    @Test
     fun theWakeWordIsFoundInTheMiddleOfASentence() {
         // Matched on partial results too, so it has to work before the sentence is finished.
         assertTrue(containsWakeWord("hey goose"))
@@ -57,19 +93,5 @@ class VoiceCommandTest {
         assertFalse(containsWakeWord("okay goo"))
         assertFalse(containsWakeWord("hello there"))
         assertFalse(containsWakeWord(""))
-    }
-
-    @Test
-    fun aStopWordIsHeardWhereverItAppears() {
-        // The always-listening loop acts on this without a wake word, so it has to catch the word
-        // inside a longer utterance, and it errs towards stopping.
-        assertTrue(containsStopWord("stop"))
-        assertTrue(containsStopWord("goose stop"))
-        assertTrue(containsStopWord("okay stop the robot now"))
-        assertTrue(containsStopWord("HALT!"))
-        assertTrue(containsStopWord("cancel that"))
-
-        assertFalse(containsStopWord("goose take me to the library"))
-        assertFalse(containsStopWord(""))
     }
 }

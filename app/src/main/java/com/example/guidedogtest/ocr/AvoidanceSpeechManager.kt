@@ -33,19 +33,27 @@ class AvoidanceSpeechManager(
     internal fun messageFor(decision: AvoidanceDecision, scene: SceneAwarenessResult?): AvoidanceSpeech? {
         if (decision.state == AvoidanceState.STOPPED) return when {
             decision.action == "EMERGENCY STOP" -> null
-            decision.action == "STOP: DROP" || scene?.dropDetected == true ->
+            // Spoken from what the stop *is*, not from the words in the action string: the action is
+            // for the bench, and an alert that depends on its exact spelling goes silent the moment
+            // somebody renames it.
+            // "Ahead" has to mean ahead: a hole beside the robot does not stop the car, so it must
+            // not be announced as if it were in the way.
+            scene?.centerDrop == true || decision.action == "STOP: DROP" ->
                 AvoidanceSpeech("Drop ahead. Stopping.", VoicePriority.UNSAFE_PATH)
-            decision.action == "STOP: NO SAFE CORRIDOR" ->
+            decision.stopReason == AvoidanceStop.UNSAFE ->
                 AvoidanceSpeech("Path blocked. Stopping.", VoicePriority.UNSAFE_PATH)
             else -> null
         }
+        // A warm-up swivel is the robot looking around, not avoiding anything: there is nothing to
+        // announce, and "obstacle on the left" for a robot that cannot see would be a lie.
+        if (decision.action.startsWith("WARM UP")) return null
         return when (decision.state) {
             AvoidanceState.TURN_LEFT -> AvoidanceSpeech(
-                if (scene?.centerState == SceneZoneState.BLOCKED) "Obstacle ahead. Moving left."
-                else "Obstacle on the right. Moving left.", VoicePriority.AVOIDANCE)
+                if (scene?.centerState == SceneZoneState.BLOCKED) "Obstacle ahead. Turning left."
+                else "Obstacle on the right. Turning left.", VoicePriority.AVOIDANCE)
             AvoidanceState.TURN_RIGHT -> AvoidanceSpeech(
-                if (scene?.centerState == SceneZoneState.BLOCKED) "Obstacle ahead. Moving right."
-                else "Obstacle on the left. Moving right.", VoicePriority.AVOIDANCE)
+                if (scene?.centerState == SceneZoneState.BLOCKED) "Obstacle ahead. Turning right."
+                else "Obstacle on the left. Turning right.", VoicePriority.AVOIDANCE)
             else -> null
         }
     }

@@ -33,6 +33,13 @@ private val CONFIRM_WORDS = listOf("yes", "yeah", "yep", "yup", "correct", "righ
 private val DENY_WORDS = listOf("no", "nope", "not", "wrong", "cancel", "nevermind", "never mind")
 
 data class VoiceRoute(
+    /**
+     * Which request produced this route. A `StateFlow` does not re-emit a value it considers equal,
+     * and two routes to the same place are equal field for field - so without a per-request id the
+     * second "take me to the library" would leave the first route (and its finished follower) in
+     * place, and the robot would answer the walker's confirmation by standing still.
+     */
+    val requestId: Long,
     val destinationName: String,
     val destinationLocation: LatLng,
     val plan: RoutePlan,
@@ -80,7 +87,7 @@ class ConversationManager(
 
     private val wakeWordDetector = WakeWordDetector(
         context = context,
-        onWakeWordDetected = { onWakeWordDetected() },
+        onWakeWordDetected = { inlineCommand -> onWakeWordDetected(inlineCommand) },
         onStopWordDetected = { onStopWord() },
     )
 
@@ -93,6 +100,9 @@ class ConversationManager(
     // destination. Non-null means the next transcript is treated as a
     // confirmation answer instead of a fresh request.
     private var pendingDestination: ResolvedPlace? = null
+
+    /** Bumped for every route the voice loads: see [VoiceRoute.requestId]. */
+    private var routeRequestId = 0L
 
     fun start() {
         _state.value = ConversationState.LISTENING_FOR_WAKE_WORD
@@ -156,14 +166,22 @@ class ConversationManager(
         return true
     }
 
-    private fun onWakeWordDetected() {
+    private fun onWakeWordDetected(inlineCommand: String) {
         if (_state.value != ConversationState.LISTENING_FOR_WAKE_WORD) {
             // During request processing this recognizer is safety-only; ordinary wake words wait.
             wakeWordDetector.resume()
             return
         }
-        Log.d(TAG, "Wake word detected")
+        Log.d(TAG, "Wake word detected (inline='$inlineCommand')")
         wakeWordDetector.pause()
+        // "Goose, stop" is one utterance, not two turns: acting on what followed the wake word
+        // skips both the acknowledgement prompt and a second round of listening, which is the
+        // difference between a command that lands and one the user has to say twice.
+        if (inlineCommand.isNotBlank()) {
+            _state.value = ConversationState.THINKING
+            onTranscript(inlineCommand)
+            return
+        }
         _state.value = ConversationState.ACK_PLAYING
         speak("Hi, how can I help?") {
             Log.d(TAG, "Ack finished, starting command capture")
@@ -242,14 +260,29 @@ class ConversationManager(
 
         if (safetyCommand != null) {
             onCommand(safetyCommand)
+            // Stop and backward are answered by whoever acts on them, never here. halt() fires its
+            // own emergency announcement, and the backward refusal is an explanation the robot must
+            // not contradict - speaking an ack here too produced two competing "Stopping now."s that
+            // interrupted each other, which sounded exactly like Goose failing to speak at all.
+            if (safetyCommand == RobotCommand.Stop || safetyCommand == RobotCommand.Backward) return
             _state.value = ConversationState.SPEAKING
             val ack = when (safetyCommand) {
-                RobotCommand.Stop -> "Stopping now."
-                RobotCommand.Forward -> "Going forward."
+                RobotCommand.Forward -> "Moving forward."
                 is RobotCommand.Turn -> "Turning ${safetyCommand.direction}."
                 else -> "Okay, going."
             }
-            speak(ack) { listenForCommand(withTimeout = true) }
+            // The command is done, so the microphone goes back to the wake word rather than staying
+            // open for a follow-up: a one-shot recognizer left listening costs battery, CPU and the
+            // occasional mistaken command, and "goose" is one word to say again.
+            speak(ack) { returnToWakeWordListening() }
+            return
+        }
+
+        // A destination in one of the fixed phrasings is resolved without the model: no round trip,
+        // no network, and the confirmation that follows is the same one the model path produces.
+        destinationRequestFor(transcript)?.let { destination ->
+            _state.value = ConversationState.THINKING
+            activeRequestJob = viewModelScope.launch { handleNavigateRequest(destination) }
             return
         }
 
@@ -266,13 +299,17 @@ class ConversationManager(
             if (command is RobotCommand.Navigate) {
                 handleNavigateRequest(command.destination)
             } else {
-                // TODO: wire this into BLE once the ESP32 link exists — for
-                // now just log it, same as the FORWARD/LEFT/STOP/RIGHT buttons.
+                // Straight through to the motors by the same path the buttons use: onCommand is what
+                // hands the command to MainActivity, which is what actually writes a wheel frame.
                 if (command !is RobotCommand.None) {
                     Log.d(TAG, "Robot command: $command")
                     onCommand(command)
                 }
                 _state.value = ConversationState.SPEAKING
+                // An answer keeps the exchange open for a follow-up: conversation is the point of the
+                // persona, and the walker should not have to say "goose" between two sentences. A
+                // *command* is different - it is done when it is done, and that one goes back to the
+                // wake word (see the safety-command branch above).
                 speak(reply.speech) { listenForCommand(withTimeout = true) }
             }
         }
@@ -298,8 +335,12 @@ class ConversationManager(
     /** Handles a yes/no answer to a previously proposed destination. */
     private suspend fun handleNavigationConfirmation(place: ResolvedPlace, transcript: String) {
         val answer = transcript.trim().lowercase()
-        val confirmed = CONFIRM_WORDS.any { answer.contains(it) }
+        // Denial wins. The question is "Did you mean <place>? Say yes or no", and the natural
+        // refusals - "no, that's not right", "not right" - contain the confirmation word "right".
+        // Reading one of those as agreement fetches a route to the place the user just refused and
+        // announces it back to them as the destination.
         val denied = DENY_WORDS.any { answer.contains(it) }
+        val confirmed = !denied && CONFIRM_WORDS.any { answer.contains(it) }
 
         when {
             confirmed -> {
@@ -324,16 +365,30 @@ class ConversationManager(
                         ),
                     )
                     _voiceRoute.value = VoiceRoute(
+                        requestId = ++routeRequestId,
                         destinationName = place.name,
                         destinationLocation = place.location,
                         plan = plan,
                     )
-                    onCommand(RobotCommand.Navigate(place.name))
                     _state.value = ConversationState.SPEAKING
                     speak(
                         "Okay, heading to ${place.name}. That's about ${formatDistance(plan.distanceMeters)}, " +
                             "roughly ${formatDuration(plan.durationSeconds)} on foot."
-                    ) { listenForCommand(withTimeout = true) }
+                    ) {
+                        // The confirmation was the go-ahead, so the walk starts here: the walker said
+                        // yes to this destination and hears the plan, and then the robot walks it -
+                        // without a second utterance. It is the app's own Go path that starts it, so
+                        // the one place that knows how a route begins (and how to refuse out loud
+                        // when there is no robot to start) is the one place that does it.
+                        //
+                        // Back to the wake word *first*: an announcement is dropped while a
+                        // conversation turn is still open, and if the start has to be refused the
+                        // walker has just been told the robot is heading somewhere - a refusal they
+                        // cannot hear is worse than none. Stopping needs no wake word, so nothing is
+                        // lost by closing the follow-up window here.
+                        returnToWakeWordListening()
+                        onCommand(RobotCommand.Go)
+                    }
                 } catch (e: Exception) {
                     Log.d(TAG, "Route computation failed: ${e.message}")
                     _state.value = ConversationState.SPEAKING

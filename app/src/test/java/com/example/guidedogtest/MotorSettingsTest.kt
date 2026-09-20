@@ -17,7 +17,7 @@ class MotorSettingsTest {
     @Test
     fun defaultsAreTheCalibratedOnes() {
         // This chassis drives crooked at equal PWM: forward is a pair, not a number.
-        assertEquals(WheelSpeeds(Drive.SPEED, Drive.SPEED - Drive.RIGHT_TRIM), defaults.forward)
+        assertEquals(WheelSpeeds(MotorTuning.MANUAL_FORWARD_LEFT, MotorTuning.MANUAL_FORWARD_RIGHT), defaults.forward)
         assertEquals("c180,128\n", defaults.forward.frame())
 
         // Pivots are asymmetric for the same reason - the right pair is weaker.

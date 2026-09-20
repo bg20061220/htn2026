@@ -74,8 +74,8 @@ Doing this before the clock starts saves ~4 hours and a lot of panic. **The buil
 - [ ] **Checkpoint:** motors obey the serial monitor, the phone drives the car over BLE, the phone holds a spoken conversation.
 
 ### Hours 10–20 · Integration (start sleep rotation)
-- [ ] **CS1 — your own app drives the car**: BLE connect, on-screen drive buttons, sending `c<left>,<right>` at ~10 Hz plus a heartbeat (`h500`) every ~200 ms. The heartbeat *is* the BLE-loss cutoff — no heartbeat, no motion.
-- [ ] **CS1 — voice → motion**: say "go / stop / left / right / back"; "stop" must halt the car in under half a second.
+- [ ] **CS1 — your own app drives the car**: BLE connect, on-screen drive buttons. The shipped loop sends `c<left>,<right>` at 20 Hz, drops to 5 Hz while the assistant has the microphone (a 20 Hz stream plus the serial reader starves the on-device recognizer on this phone), and sends `h500` on **every** tick, so the firmware's 500 ms cutoff holds at either rate. The heartbeat *is* the BLE-loss cutoff — no heartbeat, no motion.
+- [ ] **CS1 — voice → motion**: say "goose, go forward" / "goose, turn left" / "goose, stop" / "goose, take me to the library". "go forward" and the turns drive under the depth layer, so they need the camera view (which they open themselves); "stop" must halt the car in under half a second and be spoken **once**; "backward" is refused out loud, because nothing measures behind the robot.
 - [ ] **EE — wire the HC-SR04** (TRIG GPIO5, ECHO GPIO18 through a 1k/2k divider to 3.3 V), set `HAS_SONAR 1` in `firmware/openbot/openbot.ino`, reflash. The firmware now auto-stops at 10 cm.
 - [ ] **EE — wire the VL53L1X** (3V3, SDA GPIO21, SCL GPIO22) and add the drop-off emergency stop to the firmware.
 - [ ] **EE — the safety test that matters:** robot on a real table edge → it must stop. Then cut the BLE link mid-drive → motors must cut within 500 ms.
@@ -97,7 +97,7 @@ Doing this before the clock starts saves ~4 hours and a lot of panic. **The buil
 **ARCore depth layer (CS1 — stretch, only once core is rock-solid):**
 - [ ] Enable the ARCore session + **Depth API** in the app.
 - [ ] Confirm a live depth map renders on the S21 screen so you can *see* it working.
-- [ ] Feed depth into gap-seeking: split the depth frame into vertical columns, take the widest-clearance direction, blend with the sensor data.
+- [ ] Feed depth into gap-seeking: the three boxes now do this directly (left / centre / right, floor excluded), so this item is **done** — see *Three boxes* above.
 - [ ] If depth is flaky or eats time, **turn it off and fall back to sensors** — it must never destabilize the core demo.
 
 ### Hours 40–46 · Pitch
@@ -183,16 +183,19 @@ the whole 4–13 / 15–18 range if you unplug the camera module.
 **Drive calibration — one place.** FORWARD/LEFT/RIGHT on the **Configure Robot** page are what both
 *manual* and *automatic* driving use: the follower reads the same values every tick, so the straight
 line it drives is the tuned FORWARD pair and the rotation it makes is the tuned LEFT/RIGHT pair for
-that direction. Change a number and the next route frame uses it — no rebuild, no reflash.
+that direction, and the depth-avoidance layer derives everything it sends from the same pair (its
+cruise *is* the tuned FORWARD pair, its cautious state is that pair scaled down with the ratio kept,
+its arcs are a transfer between the two sides, and its pivots are the tuned turn pairs). Change a
+number and the next route frame uses it — no rebuild, no reflash.
 
 Each command carries **both** wheel speeds, because this chassis runs crooked at equal values — the
 right pair is weaker — so "forward" is a pair of numbers, not one, and a right turn is not the mirror
 of a left one. The defaults are the values measured on this chassis: forward `180 / 128`, turns
-`-190 / 170` and `190 / -180`.
+`-205 / 190` and `205 / -195` (`MotorTuning.MANUAL_*`).
 
-The only wheel constants left in code are `Drive.SPEED` and `Drive.RIGHT_TRIM` in
-`app/src/main/java/com/example/guidedogtest/RobotLink.kt` — they are the *defaults* the page starts
-from, not a second source of truth.
+The only wheel constants left in code are those `MotorTuning.MANUAL_*` defaults and the
+`MIN_EFFECTIVE_*` motor floors in `MotorSettings.kt`, plus the single avoidance shaping constant
+described under *Camera view* below. Nothing else decides a PWM number.
 
 The trim lives in the app, not the firmware, so raw-frame tools (the laptop teleop, the OpenBot app)
 will still pull slightly to one side. That is expected: `c<left>,<right>` stays honest PWM.
@@ -254,6 +257,13 @@ still works — you just tap CONNECT ROBOT instead of getting the auto-open prom
 | `f` | report robot type + feature list |
 | `w<ms>` / `v<ms>` / `s<ms>` | telemetry intervals: wheel rpm / battery / sonar |
 
+The sketch arms that cutoff **at boot**, with a 750 ms default (`heartbeat_interval` in
+`openbot.ino`), so an app that dies before it ever sends an `h` cannot leave the car rolling — the
+motors stop 750 ms after the last command, no heartbeat required. This app then asks for 500 ms
+(`h500`) and sends it on every tick of its transmit loop — 20 Hz while driving, 5 Hz while the
+microphone is live — and the OpenBot app asks for 750 ms (`h750`, every 250 ms). All of them sit
+inside the cutoff they asked for.
+
 **Telemetry coming back:** `s<cm>` sonar · `w<rpmL>,<rpmR>` wheels · `v<volts>` battery · `b<id>` bumper · `f<type>:…` features · `r` on boot.
 
 **BLE (fallback link, when the cable is unplugged):** advertises as `OpenBot: DIY_ESP32`; service `61653dc3-4021-4d1e-ba83-8b4eec61d613`; RX (phone → car, write-without-response) `06386c14-86ea-4d71-811c-48f97c58f8c9`; TX (car → phone, notify) `9bf1103b-834c-47cf-b149-c9e4bcf778a7`. The app uses USB when a device is attached and only scans BLE otherwise.
@@ -265,6 +275,57 @@ still works — you just tap CONNECT ROBOT instead of getting the auto-open prom
   (bring-up tool, never the demo path). `--port COM5` does the same over USB. Keys: `w/a/s/d`,
   space = stop, `x` = quit.
 
+## Voice control (as built)
+
+**Wake word: "goose".** The wake-word loop is the always-on listener: an on-device `SpeechRecognizer`
+restarting in a cycle, scanning partial and final transcripts for the word. Two things it does that
+are worth knowing before you debug it:
+
+- **A command said in the same breath is acted on directly.** "Goose, stop" is one utterance: the
+  text after the wake word goes straight to the command path, with no "Hi, how can I help?" in
+  between and no second round of listening. A *partial* transcript carrying a complete local command
+  is used after a 650 ms debounce, so a half-recognised word cannot fire a command; phrases with a
+  place name wait for the final transcript, because place names truncate easily.
+- **The wake word fires once per utterance.** `stopListening()` still delivers one trailing
+  `onResults` for the same utterance, which used to fire the wake word a second time — resuming the
+  wake loop exactly as the one-shot command recognizer started, so the two fought over the
+  microphone and the command capture lost. Both a per-utterance flag and an `isActive` check stop it.
+
+**Stop words need no wake word.** "stop", "halt", "cancel" and the fixed variants in
+`EmergencyStopMatcher` stop the car the moment they are heard, from either recognizer, with no model
+round trip and no network. The spoken acknowledgement comes from exactly **one** place (`halt()`'s
+emergency announcement): a second ack used to interrupt the first, which sounded like Goose failing
+to speak at all.
+
+**Motion commands run under the depth layer.** "go forward" and "turn left/right" arm the camera view
+and steer with the obstacle-avoidance layer rather than latching a wheel pair — the person saying them
+cannot see the car, so the same sensing that guards a route guards a spoken command. If depth is not
+live the car halts and says so (see *Camera view* above); the **Configure Robot** page's buttons remain
+the unguarded bench path. **"backward" is refused** out loud: only the forward corridor is measured,
+so a reverse command cannot be checked against anything.
+
+**Destinations in fixed phrasings skip the model.** "take me to X", "go to X", "navigate to X",
+"bring me to X", "walk to X" are extracted locally and resolved by Places — no round trip, works with
+no data, and the confirmation ("Did you mean X? Say yes or no") is the same one the model path
+produces. The model still handles everything else, and a refusal is never read as agreement.
+
+**A confirmed destination is a walk, not a route on the map.** Saying yes loads the route *and starts
+it*: the summary ("Okay, heading to the library…) is spoken, and the moment it finishes the app's own
+Go runs — no second utterance, because the walker has already agreed to this destination. Two details
+the order matters for:
+
+- the microphone goes back to the wake word *before* the Go, because a plain announcement is dropped
+  while a conversation turn is still open — and the one announcement that must never be dropped is
+  "I'm not connected to the robot, so I can't walk there." Stopping needs no wake word, so closing the
+  follow-up window here costs nothing.
+- asking for the same place twice is a new walk. `MutableStateFlow` conflates equal values, so the
+  route carries a per-request id; without it the second request would leave the finished follower in
+  place and the robot would answer by standing still.
+
+**After a command finishes, the microphone goes back to the wake word.** A completed command's ack
+does not keep the one-shot recognizer open — that costs battery, CPU and the occasional mistaken
+command. The exception is a destination *proposal*, which stays listening so "yes"/"no" can follow.
+
 ## Route following (Google Routes → motors)
 
 **Setup (once):** create a Google Maps Platform key with the **Routes API** enabled, paste it into
@@ -275,7 +336,25 @@ time; `local.properties` is gitignored, so it never lands in the repo. The app s
 **Using it:** type a destination in the box → **GET ROUTE** (WALK mode, from the current GPS fix) →
 the screen shows the step count, total distance and the step being executed → **START FOLLOWING** hands
 the motors to the follower. Any manual button (FORWARD/LEFT/STOP/RIGHT) or STOP FOLLOWING takes them
-back, and both send `c0,0` first.
+back: the follower's frame is dropped in the same tick the command is set, so there is no moment where
+two things are driving, and STOP sends `c0,0` immediately rather than waiting for the next tick.
+
+**The route fetch leaves the main thread inside `RoutesApi.fetchRoute`.** The call is a blocking
+`HttpURLConnection` POST, so `fetchRoute` is `suspend` and switches itself to `Dispatchers.IO`. That is
+deliberate: a caller that does not switch threads compiles fine and throws
+`NetworkOnMainThreadException` on the phone, inside whatever `try` is around it — which is exactly how
+the spoken-destination path used to answer every confirmed destination with "Sorry, I couldn't
+calculate the route", while the typed-destination button, which happened to wrap the same call in
+`withContext(Dispatchers.IO)`, worked. One place now owns the dispatcher, so no call site can forget
+it (`review/harness/voice_route_check.py` fails if a manual wrapper comes back).
+
+**Who is driving while a route is running:** the follower, unless the depth-avoidance layer objects.
+One function decides it — `DriveArbiter.resolve` in `DriveArbiter.kt` — and the order is: a stop from
+that layer (a drop, no corridor, or a depth feed that has gone quiet) stops the car outright; a pivot
+it needs around an obstacle is its own tuned pair; otherwise the follower's frame goes out with the
+controller's corridor steering laid on top of it as a bias, so the route keeps the direction and the
+obstacle only bends the arc. Nothing else writes a wheel frame, and there is no mode to switch back:
+an obstacle bends or interrupts the route, and the route resumes the moment the corridor is clear.
 
 **How a route becomes motion:** each Routes step is "go this way for this far", and *this way* is a
 bearing, not Google's maneuver word. The robot points itself at the step's `endLocation` — a closed
@@ -292,6 +371,171 @@ portrait top edge — is 90° off the robot's forward direction; `HeadingSource`
 `ROBOT_HEADING_OFFSET_DEGREES` constant in `Heading.kt`, so everything downstream (route following,
 the map arrow, the readouts) sees the robot's heading. Local magnetic declination is added from the
 fix, so the compass reads true north like the GPS bearings do.
+
+**Camera view and the automatic layer.** **CAMERA VIEW** on the controls screen opens the depth view;
+the **AUTO AVOIDANCE** switch opens the same view and turns the driving layer on.
+
+**Three boxes, and the floor is not an obstacle in any of them.** The depth frame is reduced to three
+rectangles — left, centre, right, each a third of the region the camera is trusted over, drawn on the
+preview with their state colour and the distance they found. The drawn box is the part **above the
+floor line** (the analyzer reports where the floor ends, per frame); below it a thin, dim strip marks
+the floor those rows are for. The floor rows are still *sampled* — they are what fits the ground
+plane, and a step down or a low obstacle only ever shows up in the bottom rows — but they are never
+an obstacle, and the drawing now says so. Before anything is classified, the bottom
+rows of all three boxes are fitted with a **ground plane** (inverse depth against image row, which is
+what a flat floor looks like in a perspective projection). Every sample is then judged against that
+plane: matching it is *floor* and is support, **nearer than it is an obstacle**, and **farther than it
+by 0.45 m is a drop**. That is the whole difference between a robot that walks down a corridor and one
+that reports an obstacle at arm's length from a flat carpet, and it is why a box holding nothing but
+floor reports no distance at all rather than a hazard.
+
+**What the robot does about them — the rule, in the words we asked for it:**
+
+| the boxes | the robot |
+|---|---|
+| centre **green** | drive on (cruising on the tuned FORWARD pair, leaning off a wall that is hard against one side, or holding the middle of a hallway) |
+| centre **red**, a side **green or yellow** | turn in place towards that side, on the tuned LEFT/RIGHT pair, and **hold** that side while the middle stays red so a near-tie cannot rock it left and right |
+| centre **yellow** | creep past: the cautious pair, steering off the nearer side |
+| **all three red** | stop, and say *"Path blocked. Stopping."* |
+| a **drop in the centre** box | stop, and say *"Drop ahead. Stopping."* |
+| a **drop in a side** box | **keep going** — that side is closed off, exactly like a wall, and the car leans away from it. A hole beside the robot is not in its path, and stopping for it is how a drain cover ends a walk |
+
+**The colours come from the floor, and the floor has to be inside ARCore's depth picture.** Measured
+on the S21 holding the phone **upright** (so its rear camera points at the horizon): the depth image
+held nothing but corridor — a column down its middle read 6.4, 6.4, 6.6 … 6.8 m top to bottom, no near
+field at all, because ARCore's depth covers only the **middle ~74 % of the camera picture** (the
+depth-image corners map to texture v 0.13–0.87). The floor, plainly visible along the bottom of the
+preview, is *below* the measured region, and ARCore fills that strip with the far edge value. Result:
+no floor model, every box grey, and the robot refusing to move — correctly, because a robot that
+cannot see the floor in front of it cannot tell floor from stairwell.
+
+**And depth needs motion — this is the one that will bite first.** The S21 has no ToF sensor, so
+ARCore's Depth API is *depth-from-motion*: it estimates depth from the camera moving over time
+(parallax). A stationary phone gets coarse, empty or degenerate depth, which is exactly what every
+measurement above shows — all of them were taken with the phone sitting still, and the result was
+either nothing at all (`nonzero 0/14400`) or a flat far-field slab (`6.4 … 6.8 m`, slope 0.00, no
+floor at any row).
+
+That creates a real deadlock to know about before the floor test: **the robot needs to move to see the
+floor, and it needs to see the floor to move.** What that looks like in practice:
+
+- Before refusing anything, the robot **swivels in place** to make the motion itself: it turns slowly
+  one way, then the other, in 400 ms swings for up to 2.5 s. A pivot sweeps the camera along an arc —
+  which is the parallax depth-from-motion needs — and it *advances* the robot into nothing it cannot
+  see. It uses the tuned turn pair scaled down to 60 %, it will not swing towards a side whose raw
+  distance reads nearer than 0.45 m, and it stays silent while doing it (this is the robot looking
+  around, not avoiding anything).
+- If that budget runs out with no floor model, it stops and the panel says why. **If the robot is
+  standing still and grey on the floor test, watch the swivel: it should sweep, the plane should fit
+  within a swing or two, and the boxes should colour in.** A hand or the leash on the handle does the
+  same thing if the swivel is not enough.
+- **Test this on the floor before anything else:** hold the robot still, watch `adb logcat -s Boxes`
+  (the `depth not ready N` count in the `DepthCamera` line is this exact case), then push it slowly
+  forward and watch the column profile change from a flat far slab to a real floor (something like
+  `0.8, 1.1, 1.5, 2.0 …` down the image) and `fit ok` appear.
+
+So the mounting rule is: **tilt the phone down until the floor sits in the middle of the preview, not
+just along its bottom edge**, and expect to nudge the robot to get the first depth frame. On the robot (screen up, flat on the top plate) the rear camera already
+looks down at the floor, which is the configuration the depth module wants. The panel says which of
+the three states it is in — `TRACKED`, `NO DEPTH …` (ARCore returning empty frames) or `NO FLOOR IN THE
+DEPTH IMAGE …` (aim) — and prints the raw distances either way, so "the camera sees 6.8 m of corridor"
+can never be mistaken for "the camera sees nothing".
+
+**It keeps moving: a decision is held for `DECISION_HOLD_MS` (900 ms).** The boxes flicker — ARCore's
+depth shifts by centimetres frame to frame on a flat wall, and a person walking past changes a box for
+one frame — and with a decision every 125 ms that flicker *was* the robot's behaviour: forward, a red
+side box for one frame, turn, the turn changes the view, forward again, and it crossed the room a
+hand's width at a time. Now:
+
+- a **drive is held for 900 ms**: a flickering side box, a slowdown or a turn request waits, while the
+  middle box stays green;
+- a **red middle box still takes the wheel at once** — that is the thing pivoting is for;
+- a **stop is never held back** (a drop, no safe path, or losing sight all act on the frame they arrive);
+- **one unjudgeable frame does not count as losing sight** (`PLANE_LOSS_GRACE_MS` 250 ms): depth
+  flickers, and reacting to a single empty frame was triggering the warm-up swivel mid-walk.
+- and while following a route, the bearing error at which the car *stops to rotate* went from 25° to
+  **`alignStartDegrees` 45°**: up to that it keeps walking and steers hard (1.2 PWM per degree, clamped
+  at 60) instead of pivoting every time the compass or GPS heading wobbles.
+
+**One knob for how hard it turns: `MotorTuning.PIVOT_FRACTION` (0.6).** Every *automatic* pivot — the
+obstacle turn, a route step's turn, a spoken "turn left/right" and the warm-up swivel — uses that
+share of the pair on the Configure Robot page (205/190 becomes 123/114). Raise it towards 1.0 for
+sharper turns; **do not go below ~0.55**, because the pair is floored at the motor minimum and past
+that point both wheels sit at 110, the tuned left/right asymmetry (which is what makes this chassis
+rotate on the spot instead of curving) disappears, and the easing ramp stops showing. The manual
+LEFT/RIGHT buttons on the page are deliberately *not* scaled — they are the bench test.
+
+**A spoken turn lasts [VOICE_TURN_MS] 1.2 s**, then the robot goes back to driving on what the boxes
+say — a turn is a moment, not a mode. Say "turn left" again to turn further. (Before this, the pivot
+request sat in the intent until something else cleared it, so a clear middle never got to drive
+again.)
+
+Two cases the rule does not name, and what it does: a **yellow** middle with both sides red creeps
+forward instead of stopping (something 1.5 m ahead is not a collision yet — the stop arrives as soon
+as the middle turns red), and a **green** middle with a wall in one side box keeps driving while
+leaning away from it. A route asking for a left/right lean is not an obstacle decision at all: the car
+creeps and steers, which is what the follower got before the boxes existed.
+
+**Speed — what the decision path actually costs, measured on the S21** (`adb logcat -s DepthCamera
+Boxes Avoidance`):
+
+| | before | now |
+|---|---|---|
+| boxes read | 4 /s (a 250 ms analysis throttle, on top of a 150 ms frame gate) | **8 /s** — every depth frame is read; throttled 0, failed 0 |
+| depth frame copied out | 6–19 ms a frame, on the GL thread | **0.35 ms** (a row-at-a-time bulk read; the old loop re-computed a strided buffer offset per pixel) |
+| one decision | — | **0.06 ms** |
+| frame on the wire | waited for the next tick: up to 50 ms driving, **200 ms while the microphone was live** | sent in the same composition frame the decision changes in |
+| app CPU, camera view open | ~344 % | **~220 %** |
+| obstacle → motors | ~300 ms typical, ~600 ms worst | **~70–150 ms**, and what is left is ARCore's own depth frame interval (100–133 ms) |
+
+The two structural fixes behind that: the boxes are read **before** the heavy vision work and outside
+its busy gate (they used to run on the same single thread as the object detector and the text
+recognizer, behind them, with every frame arriving in the meantime simply dropped), and the motor
+frame is sent **when it changes** with the heartbeat on a 5 Hz timer behind it, instead of polling at
+20 Hz and letting a decision wait for the next tick.
+
+Three bench logs, one line a second each, are switched on in the camera view:
+`DepthCamera` (depth frame rate, camera copy, depth copy), `Boxes` (how many times the boxes were
+actually read, throttled, failed, and why the floor model did or did not fit) and `Avoidance` (each
+box's state and distance, the decision, and the decide cost).
+
+One constant shapes the cautious state, in `ObstacleAvoidanceController`:
+
+| Constant | Default | What it does |
+|---|---|---|
+| `AUTO_SLOW_FRACTION` | 0.88 | how much of the tuned FORWARD pair the cautious state commands — scaled on *both* sides so the ratio, and therefore the straight line, survives |
+
+Everything else it sends is derived from the Configure Robot page: the cruise *is* the tuned FORWARD
+pair, the pivots *are* the tuned LEFT/RIGHT pairs, and an arc is `MotorTuning.steered` — a transfer of
+PWM from the giving side to the far one, with each wheel floored at its `MIN_EFFECTIVE_*` so no wheel
+is ever commanded into the deadband.
+
+**Hallways are centred on the walls.** The middle of a hallway is where the two side distances are
+equal, and that is a continuous measure — so a slightly uneven wall (a skirting board, a door frame,
+depth noise on a flat surface) must not bend the path. The difference between the two sides is
+therefore **ignored up to a deadband** — a fifth of the hallway's own width, capped at 0.45 m — before
+any correction is asked for; past it, a bounded arc brings the robot back towards the middle. Both
+sides more than 2 m away is a room, not a hallway, and one measurable side is not a centre line, so
+neither produces a correction. A wall hard against *one* box while the other is open is not a hallway
+either, but it still gets the minimum nudge away from it.
+
+| Constant | Default | What it does |
+|---|---|---|
+| `CORRIDOR_SIDE_MAX_METERS` | 2.0 | both sides nearer than this = a hallway, not a room |
+| `CORRIDOR_DEADBAND_FRACTION` / `_MIN_` / `_MAX_` | 0.20 / 0.20 m / 0.45 m | how uneven a hallway may be before the robot steers to correct |
+| `CORRIDOR_CENTERING_PWM_PER_METER` | 45 | PWM of correction per metre off the middle, past the deadband |
+| `SIDE_HOLD_MARGIN_METERS` | 0.20 | how much more room the other side needs before a held side is given up |
+
+The analyzer's own thresholds (in `SceneAwarenessAnalyzer`) are worth knowing before tuning anything
+by feel: `blockedBelowMeters` 0.8, `clearAboveMeters` 1.5, `GROUND_PLANE_TOLERANCE_METERS` 0.14,
+`DROP_DEPTH_DELTA_METERS` 0.45, `DROP_CHECK_ROWS` 2 (a hole can only appear in the near rows — the
+floor in front of the robot — so counting the whole box would dilute a step edge until it never
+crossed the fraction).
+
+The semantic detector (EfficientDet labels and their depth distances) does **not** drive: it draws the
+boxes and speaks "Person ahead, 1.2 metres" — *Obstacle Voice Alerts* is **on by default**, and a
+detection with no depth behind it is still announced (without a distance) once its confidence passes
+0.65, because a label the walker cannot see is worth more than silence. Drive safety comes from box depth alone — that separation is deliberate, so a wrong label can never send the car anywhere.
 
 **Live location screen:** **LIVE MAP** on the main screen opens a full-screen **Google map** that
 follows the phone: a green arrow for the car rotated to its heading, a ring for the GPS accuracy, one
@@ -343,9 +587,10 @@ mounted on the car and nobody reads it while the robot walks.
 
 - Values are raw PWM, −255…255, one box per side, and are **saved as they are typed**
   (`MotorSettingsStore` → SharedPreferences), so a tuning session survives closing the app.
-- **These are the values routes drive with.** The follower reads them every tick, so the tuned FORWARD
-  pair is the straight line a route drives and the tuned LEFT/RIGHT pair is the rotation it makes —
-  a number changed mid-route applies on the next tick.
+- **These are the values routes and the depth-avoidance layer drive with.** The follower reads them
+  every tick, so the tuned FORWARD pair is the straight line a route drives and the tuned LEFT/RIGHT
+  pair is the rotation it makes — a number changed mid-route applies on the next tick — and the
+  avoidance layer derives its cruise, its cautious state and its pivots from the same pairs.
 - A command **stays latched** until another is pressed, across pages: set the numbers while the car
   is rolling, press STOP when it is where you want it. The main screen keeps showing
   `Robot Command: …` so a latched command is never invisible.

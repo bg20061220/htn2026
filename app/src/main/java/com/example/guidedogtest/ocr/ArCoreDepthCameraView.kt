@@ -5,7 +5,9 @@ import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.opengl.GLES11Ext
+import android.media.Image
 import android.opengl.GLES20
+import android.util.Log
 import android.opengl.GLSurfaceView
 import android.view.Surface
 import com.google.ar.core.Config
@@ -16,6 +18,7 @@ import com.google.ar.core.exceptions.CameraNotAvailableException
 import com.google.ar.core.exceptions.NotYetAvailableException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.ShortBuffer
 import java.nio.FloatBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.microedition.khronos.egl.EGLConfig
@@ -124,15 +127,68 @@ private class CameraRenderer(
             val frame = session.update()
             drawCamera(frame)
             if (frame.timestamp == 0L || frame.timestamp - lastAnalysisNanos < ANALYSIS_INTERVAL_NANOS) return
-            val cameraImage = try { frame.acquireCameraImage() } catch (_: NotYetAvailableException) { return }
+            // Depth first, and out of this frame's own camera dimensions.
+            //
+            // Both images belong to the frame session.update() just returned, and the depth image is
+            // the one the safety path cannot do without. It was being asked for *after* the camera
+            // image - which can block waiting for a buffer, and is held while the YUV planes are
+            // copied - so the request landed on a frame that had already moved on. ARCore answers that
+            // with a perfectly valid, perfectly empty image: 0 of 14,400 pixels measured, while the
+            // panel still says "Depth API: active". The dimensions come from the intrinsics, so no
+            // camera buffer needs to be held to ask.
+            val imageDimensions = frame.camera.imageIntrinsics.imageDimensions
+            val depth = acquireDepth(frame, imageDimensions[0], imageDimensions[1])
+            if (depth != null) processor.submitDepth(depth)
+
+            val cameraImage = try { frame.acquireCameraImage() } catch (_: NotYetAvailableException) { null }
+            if (cameraImage == null) {
+                visionIntervalMillis = lastAnalysisNanos.takeIf { it != 0L }?.let { (frame.timestamp - it) / 1_000_000.0 } ?: 0.0
+                lastAnalysisNanos = frame.timestamp
+                return
+            }
             val viewCorners = imageToViewCorners(frame, cameraImage.width, cameraImage.height)
+            val cameraCopyStartedNanos = System.nanoTime()
             val copied = try { ArCoreVisionProcessor.copy(cameraImage, viewCorners) } finally { cameraImage.close() }
+            cameraCopyMillis = (System.nanoTime() - cameraCopyStartedNanos) / 1_000_000.0
             val rotation = cameraRotationDegrees()
-            val depth = acquireDepth(frame, copied.width, copied.height)
+            visionIntervalMillis = lastAnalysisNanos.takeIf { it != 0L }?.let { (frame.timestamp - it) / 1_000_000.0 } ?: 0.0
             lastAnalysisNanos = frame.timestamp
             processor.submit(copied, rotation, depth)
         } catch (error: Exception) {
             if (reportedError.compareAndSet(false, true)) onError(error.message ?: "ARCore vision session failed.")
+        }
+    }
+
+    /**
+     * Copies the depth image out, a row at a time.
+     *
+     * `getShort` per pixel through the plane's row and pixel strides cost 6-19 ms a frame on the S21 -
+     * on the GL thread, at the frame rate, for 160x90 numbers - because every read recomputed an
+     * offset into a direct buffer. A row of this image is contiguous (pixel stride 2), so it can be
+     * read in bulk instead; the strided path is kept for an image that is not.
+     */
+    private fun copyDepth(
+        plane: Image.Plane,
+        buffer: ShortBuffer,
+        values: IntArray,
+        width: Int,
+        height: Int,
+    ) {
+        val rowShorts = ShortArray(width)
+        for (y in 0 until height) {
+            val rowStart = y * plane.rowStride / Short.SIZE_BYTES
+            if (plane.pixelStride == Short.SIZE_BYTES) {
+                buffer.position(rowStart)
+                buffer.get(rowShorts, 0, width)
+                val rowOffset = y * width
+                for (x in 0 until width) values[rowOffset + x] = rowShorts[x].toInt() and 0xffff
+            } else {
+                val pixelStep = plane.pixelStride / Short.SIZE_BYTES
+                val rowOffset = y * width
+                for (x in 0 until width) {
+                    values[rowOffset + x] = buffer.get(rowStart + x * pixelStep).toInt() and 0xffff
+                }
+            }
         }
     }
 
@@ -148,6 +204,12 @@ private class CameraRenderer(
         return FloatArray(6).also { output.rewind(); output.get(it) }
     }
 
+    private var depthFrames = 0
+    private var depthLogMillis = System.currentTimeMillis()
+    private var cameraCopyMillis = 0.0
+    private var depthNotReady = 0
+    private var visionIntervalMillis = 0.0
+
     private fun acquireDepth(frame: Frame, imageWidth: Int, imageHeight: Int): DepthFrame? {
         if (!depthSupported) {
             onStatus(ArDepthStatus(true, false, message = "Depth API is not supported on this device."))
@@ -156,18 +218,20 @@ private class CameraRenderer(
         val depthImage = try {
             frame.acquireDepthImage16Bits()
         } catch (_: NotYetAvailableException) {
+            // "Not yet available" is what depth-from-motion looks like when the camera has not moved:
+            // counted, because on a stationary robot it is the difference between "the depth module is
+            // broken" and "the robot needs to be nudged for the camera to have parallax to work with".
+            depthNotReady++
             onStatus(ArDepthStatus(true, false, latestDepthTimestamp, "Depth measurement temporarily unavailable."))
             return null
         }
         return try {
             val plane = depthImage.planes[0]
-            val buffer = plane.buffer.order(ByteOrder.LITTLE_ENDIAN)
+            val buffer = plane.buffer.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+            val copyStartedNanos = System.nanoTime()
             val values = IntArray(depthImage.width * depthImage.height)
-            for (y in 0 until depthImage.height) {
-                for (x in 0 until depthImage.width) {
-                    values[y * depthImage.width + x] = buffer.getShort(y * plane.rowStride + x * plane.pixelStride).toInt() and 0xffff
-                }
-            }
+            copyDepth(plane, buffer, values, depthImage.width, depthImage.height)
+            val copyMillis = (System.nanoTime() - copyStartedNanos) / 1_000_000.0
             val input = floatBuffer(floatArrayOf(0f, 0f, imageWidth.toFloat(), 0f, 0f, imageHeight.toFloat()))
             val output = floatBuffer(FloatArray(6))
             frame.transformCoordinates2d(Coordinates2d.IMAGE_PIXELS, input, Coordinates2d.TEXTURE_NORMALIZED, output)
@@ -185,6 +249,23 @@ private class CameraRenderer(
             displayOutput.rewind(); displayOutput.get(displayCorners)
             latestDepthTimestamp = depthImage.timestamp
             onStatus(ArDepthStatus(true, true, latestDepthTimestamp))
+            // The bench log: how often depth arrives and what the copy out of it costs. Rate-limited
+            // to once a second so the log itself is not part of what it measures.
+            depthFrames++
+            val nowMillis = System.currentTimeMillis()
+            if (nowMillis - depthLogMillis >= 1_000L) {
+                val fps = depthFrames * 1000.0 / (nowMillis - depthLogMillis)
+                Log.d(
+                    DEPTH_LOG_TAG,
+                    "vision %dx%d  %.1f fps  (every %.0f ms)  camera copy %.2f ms  depth copy %.2f ms  depth not ready %d".format(
+                        depthImage.width, depthImage.height, fps, visionIntervalMillis,
+                        cameraCopyMillis, copyMillis, depthNotReady,
+                    ),
+                )
+                depthFrames = 0
+                depthNotReady = 0
+                depthLogMillis = nowMillis
+            }
             DepthFrame(
                 depthImage.width,
                 depthImage.height,
@@ -235,7 +316,11 @@ private class CameraRenderer(
     }
 
     companion object {
-        private const val ANALYSIS_INTERVAL_NANOS = 150_000_000L
+
+        /** Bench log for the depth path: frame rate and the cost of copying a frame out. */
+        const val DEPTH_LOG_TAG = "DepthCamera"
+        /** One depth frame every 100 ms. Pulling one out is ~1 ms now, so the limit is ARCore. */
+        private const val ANALYSIS_INTERVAL_NANOS = 100_000_000L
         private const val VERTEX_SHADER = "attribute vec4 aPosition; attribute vec2 aTexCoord; varying vec2 vTexCoord; void main(){ gl_Position=aPosition; vTexCoord=aTexCoord; }"
         private const val FRAGMENT_SHADER = "#extension GL_OES_EGL_image_external : require\nprecision mediump float; varying vec2 vTexCoord; uniform samplerExternalOES cameraTexture; void main(){ gl_FragColor=texture2D(cameraTexture,vTexCoord); }"
 

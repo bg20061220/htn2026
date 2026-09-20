@@ -1,0 +1,37 @@
+====================================================================================================
+CONFIRMATION MATCHING — CONFIRM_WORDS vs DENY_WORDS, both read from app/src/main/java/com/example/guidedogtest/voice/ConversationManager.kt
+====================================================================================================
+CONFIRM_WORDS = ['yes', 'yeah', 'yep', 'yup', 'correct', 'right', 'sure', 'please', 'confirm']
+DENY_WORDS    = ['no', 'nope', 'not', 'wrong', 'cancel', 'nevermind', 'never mind']
+
+The user is answering: 'Did you mean <place>? Say yes or no.'  (ConversationManager.kt:295)
+
+  'yes'                      human=YES  CONFIRMED -> route fetched, 'Okay, heading to <place>'
+  'yeah'                     human=YES  CONFIRMED -> route fetched, 'Okay, heading to <place>'
+  'yep'                      human=YES  CONFIRMED -> route fetched, 'Okay, heading to <place>'
+  'sure'                     human=YES  CONFIRMED -> route fetched, 'Okay, heading to <place>'
+  'correct'                  human=YES  CONFIRMED -> route fetched, 'Okay, heading to <place>'
+  "that's right"             human=YES  CONFIRMED -> route fetched, 'Okay, heading to <place>'
+  'please'                   human=YES  CONFIRMED -> route fetched, 'Okay, heading to <place>'
+  'no'                       human=NO   DENIED    -> 'Okay, cancelled.'
+  'nope'                     human=NO   DENIED    -> 'Okay, cancelled.'
+  'wrong'                    human=NO   DENIED    -> 'Okay, cancelled.'
+  'cancel'                   human=NO   DENIED    -> 'Okay, cancelled.'
+  'never mind'               human=NO   DENIED    -> 'Okay, cancelled.'
+  "no, that's not right"     human=NO   DENIED    -> 'Okay, cancelled.'
+  'not right'                human=NO   DENIED    -> 'Okay, cancelled.'
+  'no that is not right'     human=NO   DENIED    -> 'Okay, cancelled.'
+  "no, that's wrong"         human=NO   DENIED    -> 'Okay, cancelled.'
+  "that's not the one"       human=NO   DENIED    -> 'Okay, cancelled.'
+  "no, it's not"             human=NO   DENIED    -> 'Okay, cancelled.'
+  'no please'                human=NO   DENIED    -> 'Okay, cancelled.'
+  'no thanks, not that'      human=NO   DENIED    -> 'Okay, cancelled.'
+  'turn right'               human=YES  CONFIRMED -> route fetched, 'Okay, heading to <place>'
+  'go right'                 human=YES  CONFIRMED -> route fetched, 'Okay, heading to <place>'
+
+====================================================================================================
+answers where the machine acted against what the speaker meant: []
+====================================================================================================
+
+(The table above is the fixed predicate: denial is tested first, so every refusal - including
+the ones that contain CONFIRM_WORDS' "right" - lands on the cancelled branch.)

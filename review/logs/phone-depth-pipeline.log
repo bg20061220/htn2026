@@ -1,0 +1,22 @@
+DEPTH PIPELINE — measured on Samsung SM-G991W (adb logcat -s Boxes)
+CAPTURED: 2026-09-20T08:37:31Z
+================================================================================================
+
+1. Depth acquired AFTER the camera image (the old order), phone upright in a corridor:
+     depth 160x90 nonzero 0/14400, centre pixel 0 mm  ->  sampled 201, depth returned 0
+   ARCore was answering a frame that had already moved on with a valid, empty image, while
+   reporting 'Depth API: active'. Same session moments earlier: nonzero 14400/14400.
+
+2. Depth acquired FIRST, from the frame's own intrinsics (the fix), same scene:
+     depth 160x90 nonzero 14400/14400, screen(0.5,0.7)->texture(0.50,0.65)
+     column profile (top->bottom of the depth image): 6.4,6.4,6.6,6.6,6.7,6.7,6.8,6.8,6.8,6.8 m
+     sampled 201, depth returned 201  |  support rows 3 of 3 from rows 9,8,7
+   Every sample now returns a depth. The remaining refusal is honest: this column holds no
+   near field at all, so there is no floor to fit a plane to.
+
+3. Why there is no near field held upright: ARCore's depth covers the middle ~74% of the camera
+   picture (depth-image corners map to texture v 0.13..0.87). The floor visible along the bottom
+   of the preview is below that, and ARCore fills it with the far edge value - 6.8 m, not 1 m.
+   Mounted on the robot (screen up, flat) the camera looks down, so the floor is inside the
+   measured region - which is where the plane will fit and the boxes will colour in.
+================================================================================================

@@ -77,7 +77,7 @@ class RouteFollowerTest {
     fun drivesStraightWithTheChassisTrimWhenThereIsNoHeading() {
         val follower = RouteFollower(listOf(step(100, 43.48, -80.5449)))
         assertEquals(
-            Command.Drive(Drive.SPEED, Drive.SPEED - Drive.RIGHT_TRIM),
+            Command.Drive(MotorSettings().forward.left, MotorSettings().forward.right),
             follower.update(fix(origin.lat, origin.lng), 1.0),
         )
     }
@@ -135,14 +135,15 @@ class RouteFollowerTest {
     fun turnSpeedUsesTheTunedPairAndEasesOffNearTheBearing() {
         val follower = RouteFollower(listOf(eastStep()))
 
-        // Far off (90 degrees): the full pair tuned for a right turn.
+        // Far off (90 degrees): the tuned right pair at MotorTuning.PIVOT_FRACTION - every automatic
+        // turn is scaled by that one number, so a route's turn is as gentle as the obstacle logic's.
         val wide = follower.update(fix(origin.lat, origin.lng, heading = 0.0), 1.0) as Command.Pivot
-        assertEquals(MotorSettings().right.left, wide.left)
-        assertEquals(MotorSettings().right.right, wide.right)
+        assertEquals(MotorTuning.pivotPair(MotorSettings().right).left, wide.left)
+        assertEquals(MotorTuning.pivotPair(MotorSettings().right).right, wide.right)
 
-        // Closing on the bearing (26 degrees off, just past the start threshold): still full effort.
+        // Closing on the bearing (50 degrees off, just past the start threshold): still full effort.
         val stillWide =
-            follower.update(fix(origin.lat, origin.lng, heading = 64.0), 1.0) as Command.Pivot
+            follower.update(fix(origin.lat, origin.lng, heading = 40.0), 1.0) as Command.Pivot
         assertEquals(wide.left, stillWide.left)
 
         // Nearly there (14 degrees off): a fraction of the same pair, same asymmetry.
@@ -158,8 +159,8 @@ class RouteFollowerTest {
         val command = follower.update(fix(origin.lat, origin.lng, heading = 0.0), 1.0) as Command.Pivot
 
         assertTrue("expected a left turn, got ${command.degrees}", command.degrees < 0)
-        assertEquals(MotorSettings().left.left, command.left)
-        assertEquals(MotorSettings().left.right, command.right)
+        assertEquals(MotorTuning.pivotPair(MotorSettings().left).left, command.left)
+        assertEquals(MotorTuning.pivotPair(MotorSettings().left).right, command.right)
     }
 
     @Test
@@ -192,16 +193,21 @@ class RouteFollowerTest {
 
     @Test
     fun turningUsesTheTunedPairsForEachDirection() {
+        // The page's pair, scaled by MotorTuning.PIVOT_FRACTION (the one knob for how hard the robot
+        // turns) and floored at the motor minimum. At this fraction both tuned pairs land on the floor,
+        // so what is pinned here is the *direction*, which is the part the page's asymmetry decides.
         val follower = RouteFollower(listOf(eastStep()), tuning = { tunedAway })
 
         val right = follower.update(fix(origin.lat, origin.lng, heading = 0.0), 1.0) as Command.Pivot
-        assertEquals(155, right.left)
-        assertEquals(-145, right.right)
+        assertEquals(MotorTuning.pivotPair(tunedAway.right).left, right.left)
+        assertEquals(MotorTuning.pivotPair(tunedAway.right).right, right.right)
 
         val west = RouteFollower(listOf(step(200, origin.lat, origin.lng - 0.002)), tuning = { tunedAway })
         val left = west.update(fix(origin.lat, origin.lng, heading = 0.0), 1.0) as Command.Pivot
-        assertEquals(-150, left.left)
-        assertEquals(140, left.right)
+        assertEquals(MotorTuning.pivotPair(tunedAway.left).left, left.left)
+        assertEquals(MotorTuning.pivotPair(tunedAway.left).right, left.right)
+        assertTrue("a right turn is left-positive, a left turn is right-positive",
+            right.left > 0 && right.right < 0 && left.left < 0 && left.right > 0)
     }
 
     @Test
@@ -210,7 +216,7 @@ class RouteFollowerTest {
         val follower = RouteFollower(listOf(step(100, 43.48, -80.5449)), tuning = { tuning })
 
         assertEquals(
-            Command.Drive(Drive.SPEED, Drive.SPEED - Drive.RIGHT_TRIM),
+            Command.Drive(MotorSettings().forward.left, MotorSettings().forward.right),
             follower.update(fix(origin.lat, origin.lng), 1.0),
         )
 
@@ -233,9 +239,14 @@ class RouteFollowerTest {
                 step(40, origin.lat + 0.0005, origin.lng + 0.0005),
             )
         )
-        // Standing on step 1's end: it advances to step 2 and points itself at its end.
+        // Standing on step 1's end: it advances to step 2 and points itself at its end. Step 2 heads
+        // north-east from here, which is 45 degrees off a due-north heading - the edge of the pivot
+        // threshold, so it drives and steers hard rather than stopping to rotate (alignStartDegrees is
+        // 45: a moderate error is held by the steering term while the car keeps walking).
         val command = follower.update(fix(origin.lat, origin.lng, heading = 0.0), 1.0)
-        assertTrue("expected a pivot onto the new bearing, got $command", command is Command.Pivot)
+        assertTrue("expected to keep driving onto the new bearing, got $command", command is Command.Drive)
+        command as Command.Drive
+        assertTrue("and to steer hard towards it, got $command", command.left > command.right + 50)
         // Index is 0-based, so the second step is index 1.
         assertEquals(1, follower.index)
         assertEquals("step 2 of 2", follower.progressLabel())

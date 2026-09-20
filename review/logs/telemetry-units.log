@@ -1,0 +1,48 @@
+====================================================================================================
+TELEMETRY UP-LINK — firmware emitters, app parser, and the unit the model is told
+====================================================================================================
+
+-- 1. which telemetry frames can this board emit? (OPENBOT = DIY_ESP32) --------------
+frame            producer                   flag that gates it                 state on this board
+v<volts>         openbot.ino:1759-1761      HAS_VOLTAGE_DIVIDER = 0            COMPILED OUT
+s<cm>            openbot.ino:1865-1867      HAS_SONAR = 0                      COMPILED OUT
+w<rpm>,<rpm>     openbot.ino:1777-1783      HAS_SPEED_SENSORS_FRONT = 0        COMPILED OUT
+b<id>            openbot.ino:1457-1459      HAS_BUMPER = None                  COMPILED OUT
+r                setup(), openbot.ino:942   -                                  compiled in
+
+-> the only frame the app can ever receive from this board is the boot banner 'r'.
+
+-- 2. the app's parser, on a frame per sensor -----------------------------------------
+s25                    -> 'obstacle 25 cm'         'sonar at STOP_DISTANCE (10 cm is the firmware cutoff) -- 25 cm here'
+s0                     -> 'obstacle 0 cm'          'sonar floored'
+s300                   -> 'obstacle 300 cm'        'MAX_SONAR_DISTANCE'
+v12.34                 -> 'battery 12.34 V'        'battery'
+w210,196               -> 'wheels 210,196 rpm'     'wheel odometry'
+bcf                    -> 'bump cf'                'bumper'
+r                      -> 'robot ready'            'boot banner'
+fDIY:v:s:              -> None                     'feature reply (never requested by the app)'
+Control: 180,128       -> None                     "the DEBUG echo of a control frame -- first char 'C', not 'c'"
+Heartbeat Interval: 500 -> None                     'the DEBUG echo of a heartbeat'
+
+-- 3. what the model is told, for the same readings -----------------------------------
+GroqClient.kt:89-96 ships SensorSnapshot.frontDistanceMm under the key 'frontDistanceMm'.
+The firmware's sonar value is CENTIMETRES (openbot.ino:669-670 comment), so a naive
+frontDistanceMm = <sonar value> is a 10x under-report of the true distance.
+
+wire frame     cm         mm (!)           what the model concludes     ObstacleAvoidanceController verdict
+s25            25         25               obstacle at 0.03 m, must stop BLOCKED (real 0.25 m)
+s60            60         60               obstacle at 0.06 m, must stop BLOCKED (real 0.60 m)
+s100           100        100              obstacle at 0.10 m, must stop CAUTION (real 1.00 m)
+s150           150        150              obstacle at 0.15 m, must stop clear (real 1.50 m)
+s300           300        300              obstacle at 0.30 m, must stop clear (real 3.00 m)
+
+-- 4. what the model is told: who supplies SensorSnapshot ----------------------------
+  MainActivity passes sensorProvider = { sensorSnapshot }                yes
+  OcrScreen publishes the scene the controller decided on (onSceneSnapshot) yes
+  the metres -> millimetres conversion lives in one function             yes
+  a robot that cannot see says so (hazardsKnown reaches the model)       yes
+
+Consumer behaviour with a live scene: the same SceneAwarenessResult the safety controller
+decides on is what the model is told, in millimetres, with hazardsKnown=false whenever
+there is no depth frame - so a clear-path claim always has evidence behind it.
+====================================================================================================

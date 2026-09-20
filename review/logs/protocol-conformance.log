@@ -1,0 +1,54 @@
+====================================================================================================
+PROTOCOL CONFORMANCE — app frame writers vs openbot.ino receive path
+====================================================================================================
+
+-- 1. the frames the app actually emits ----------------------------------------------
+Drive.frame(180,128)  (FORWARD, tuned pair)          -> ctrl=(180,128)  heartbeat=750  ctrl_msgs=1  hb_msgs=0
+      expected (180, 128)  PASS
+Drive.STOP_FRAME                                     -> ctrl=(0,0)  heartbeat=750  ctrl_msgs=1  hb_msgs=0
+      expected (0, 0)  PASS
+Drive.frame(-205,190) (LEFT, tuned pivot)            -> ctrl=(-205,190)  heartbeat=750  ctrl_msgs=1  hb_msgs=0
+      expected (-205, 190)  PASS
+Drive.frame(205,-195) (RIGHT, tuned pivot)           -> ctrl=(205,-195)  heartbeat=750  ctrl_msgs=1  hb_msgs=0
+      expected (205, -195)  PASS
+Drive.frame(-180,-128) (BACK)                        -> ctrl=(-180,-128)  heartbeat=750  ctrl_msgs=1  hb_msgs=0
+      expected (-180, -128)  PASS
+Drive.frame(255,255)  (clamp ceiling, Drive.MAX_PWM) -> ctrl=(255,255)  heartbeat=750  ctrl_msgs=1  hb_msgs=0
+      expected (255, 255)  PASS
+Drive.frame(-255,-255) (clamp floor)                 -> ctrl=(-255,-255)  heartbeat=750  ctrl_msgs=1  hb_msgs=0
+      expected (-255, -255)  PASS
+
+-- 2. chunking: does the framing survive how the bytes arrive? ----------------------
+frame split across two feed() chunks                 -> ctrl=(180,128)  heartbeat=750  ctrl_msgs=1  hb_msgs=0
+      expected (180, 128)  PASS
+frame split after the header byte                    -> ctrl=(180,128)  heartbeat=750  ctrl_msgs=1  hb_msgs=0
+      expected (180, 128)  PASS
+two frames in one chunk                              -> ctrl=(0,0)  heartbeat=750  ctrl_msgs=2  hb_msgs=0
+      (last frame wins: ctrl=(0, 0))  PASS
+frame + heartbeat in one chunk                       -> ctrl=(180,128)  heartbeat=500  ctrl_msgs=1  hb_msgs=1
+      expected (180, 128)  PASS
+
+-- 3. malformed input the app does not produce (what the parser does with it) -------
+trailing CR (\r\n terminator)                        -> ctrl=(180,128)  heartbeat=750  ctrl_msgs=1  hb_msgs=0
+no terminator at all                                 -> ctrl=(0,0)  heartbeat=750  ctrl_msgs=0  hb_msgs=0
+no terminator, then a well-formed frame              -> ctrl=(180,128)  heartbeat=750  ctrl_msgs=1  hb_msgs=0
+junk before the frame                                -> ctrl=(180,128)  heartbeat=0  ctrl_msgs=1  hb_msgs=1
+truncated body 'c180\n' (missing right)              -> ctrl=(180,0)  heartbeat=750  ctrl_msgs=1  hb_msgs=0
+empty body 'c\n'                                     -> ctrl=(0,0)  heartbeat=750  ctrl_msgs=1  hb_msgs=0
+unknown header 'z1,2\n'                              -> ctrl=(0,0)  heartbeat=750  ctrl_msgs=0  hb_msgs=0
+bare newline                                         -> ctrl=(0,0)  heartbeat=750  ctrl_msgs=0  hb_msgs=0
+70-char body on one frame                            -> 11 bytes dropped once msg_buf was full (MAX_MSG_SZ=60)  WITHIN BOUNDS
+
+-- 4. deadman switch: openbot.ino:771-774, 1041-1044, 1493-1500 --------------------
+unsigned long heartbeat_interval = 750  ->  750
+at boot, millis()=0, check (millis()-heartbeat_time) >= heartbeat_interval is False
+750 ms after boot, no heartbeat ever received: deadman fires? True
+after 1 hour uptime, no heartbeat ever received: deadman fires? True
+after h500 is received, +400 ms: deadman fires? False  (interval=500 ms)
+after h500 is received, +501 ms: deadman fires? True
+app cadence: driving tick = 50 ms  ->  deadman fires before the next heartbeat? False  (margin 450 ms)
+app cadence: listening tick = 200 ms  ->  deadman fires before the next heartbeat? False  (margin 300 ms)
+
+====================================================================================================
+RESULT: 11/11 checks passed
+====================================================================================================

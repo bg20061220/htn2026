@@ -1,0 +1,22 @@
+====================================================================================================
+ELEVENLABS CONTRACT CHECK — one TTS call, exactly the request ElevenLabsClient builds
+====================================================================================================
+endpoint        : POST https://api.elevenlabs.io/v1/text-to-speech/EXAVITQu4vr4xnSDxMaL/stream?output_format=mp3_44100_128
+voiceId         : EXAVITQu4vr4xnSDxMaL  (ElevenLabsClient.kt:30, "Sarah")
+model_id        : eleven_turbo_v2_5
+api key         : sk_37b... (ELEVENLABS_API_KEY)
+client timeout  : ElevenLabsClient.kt:36 .callTimeout(15 s)
+text            : "Okay, heading to the library. That's about 400 m, roughly 5 min on foot." (72 chars, the route-confirmation sentence)
+
+HTTP status     : 200
+content-type    : audio/mpeg
+all headers     : {'access-control-allow-headers': '*', 'access-control-allow-methods': 'POST, PATCH, OPTIONS, DELETE, GET, PUT', 'access-control-allow-origin': '*', 'access-control-expose-headers': 'request-id, history-item-id, character-cost, regeneration-count, generation-info, current-concurrent-requests, maximum-concurrent-requests, quality-check-attempts, quality-check-passed, quality-check-failure-reason', 'access-control-max-age': '600', 'alt-svc': 'h3=":443"; ma=2592000', 'character-cost': '36', 'connection': 'close', 'content-type': 'audio/mpeg', 'current-concurrent-requests': '1', 'date': 'Sun, 20 Sep 2026 05:10:26 GMT', 'history-item-id': 'XnxtmQFbFTY6ewPSEkCZ', 'maximum-concurrent-requests': '4', 'request-id': 'djkBWK0yvKrGooOUlvM0', 'server': 'uvicorn', 'strict-transport-security': 'max-age=1800;', 'transfer-encoding': 'chunked', 'vary': 'Accept-Language', 'via': '1.1 google', 'workspace-concurrent-requests': '1', 'x-region': 'us-central1', 'x-trace-id': '1b1b1c48d067420f5a26d989be6de362'}
+bytes received  : 77785
+first bytes     : b'ID3\x04' (MPEG audio frame sync / ID3 — written to review/logs/elevenlabs-sample.mp3)
+elapsed         : 0.375 s
+
+VERDICT: the configured voiceId serves audio on this account; the free-tier 402 that
+         ElevenLabsClient.kt:18-21 works around did not apply here.
+
+NOTE: streamSpeech downloads the whole MP3 before MediaPlayer starts (ElevenLabsClient.kt:44-50),
+      so the download time above is added to every spoken reply before the first phoneme.

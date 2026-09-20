@@ -125,7 +125,16 @@ class RouteFollower(
          * Two thresholds rather than one: a single one would have it chattering between driving and
          * pivoting on the boundary, and every chatter is a correction the chassis has to absorb.
          */
-        val alignStartDegrees: Double = 25.0,
+        /**
+         * Heading error at which the car stops to rotate, in degrees.
+         *
+         * 45, not 25: the steering term can hold a moderate error while driving (1.2 PWM per degree,
+         * clamped at 60), and stopping to pivot for anything past 25 degrees meant a noisy compass or
+         * a coarse GPS heading had the car turning in place every few metres instead of walking the
+         * step. Past 45 the bearing error is pointing the wrong way down the street, and a pivot is
+         * the honest answer.
+         */
+        val alignStartDegrees: Double = 45.0,
         /** ...and the tighter one that ends the rotation, so it never hunts past the target. */
         val alignStopDegrees: Double = 10.0,
         /**
@@ -204,7 +213,8 @@ class RouteFollower(
             }
         }
 
-        return Command.Drive(left = steeredLeft(fix, target), right = steeredRight(fix, target))
+        val driven = MotorTuning.steered(tuning().forward, steer(fix, target))
+        return Command.Drive(left = driven.left, right = driven.right)
     }
 
     /** Which way we would have to turn to face the current target, or null without a heading. */
@@ -246,19 +256,20 @@ class RouteFollower(
         return config.turnCreepFraction + (1.0 - config.turnCreepFraction) * (travelled / span)
     }
 
-    private fun scale(pwm: Int, factor: Double): Int =
-        MotorTuning.enforceMinimum(Geo.clampPwm((pwm * factor).roundToInt()))
+    /**
+     * The tuned pair at [factor] of its strength, and never more than [MotorTuning.PIVOT_FRACTION] of
+     * it: a route's turn is as gentle as every other automatic turn, or the floor test tunes one and
+     * not the others.
+     */
+    private fun scale(pwm: Int, factor: Double): Int = MotorTuning.enforceMinimum(
+        Geo.clampPwm((pwm * factor * MotorTuning.PIVOT_FRACTION).roundToInt()),
+    )
 
+    /** The steering the bearing error asks for, before it is laid on the tuned pair. */
     private fun steer(fix: Fix, target: GeoPoint): Int {
         val error = bearingErrorDegrees(fix, target) ?: return 0
         return (error * config.steerGain)
             .coerceIn(-config.maxSteer.toDouble(), config.maxSteer.toDouble())
             .toInt()
     }
-
-    private fun steeredLeft(fix: Fix, target: GeoPoint) =
-        MotorTuning.enforceMinimum(Geo.clampPwm(tuning().forward.left + steer(fix, target)))
-
-    private fun steeredRight(fix: Fix, target: GeoPoint) =
-        MotorTuning.enforceMinimum(Geo.clampPwm(tuning().forward.right - steer(fix, target)))
 }

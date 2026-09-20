@@ -1,0 +1,49 @@
+====================================================================================================
+WHICH PHRASES STOP THE ROBOT — the one matcher the runtime uses
+====================================================================================================
+EmergencyStopMatcher.accepted (10 phrases, app/src/main/java/com/example/guidedogtest/voice/EmergencyStopMatcher.kt):
+    'stop'
+    'stop robot'
+    'robot stop'
+    'goose stop'
+    'stop goose'
+    'please stop'
+    'stop please'
+    'halt'
+    'cancel'
+    'cancel that'
+
+runtime path: ['if (matches?.any(EmergencyStopMatcher::matches) != true) return false']
+
+phrases a user would say while the robot walks, and what the loop does with them:
+
+  spoken (recognizer output)           always-listening loop
+  'stop'                               STOPS
+  'Stop.'                              STOPS
+  'STOP!'                              STOPS
+  'halt'                               STOPS
+  'cancel'                             STOPS
+  'stop robot'                         STOPS
+  'goose stop'                         STOPS
+  'please stop'                        STOPS
+  'okay stop the robot now'            ignored
+  'stop the robot'                     ignored
+  'stop it'                            ignored
+  'stop now'                           ignored
+  'no stop'                            ignored
+  'goose stop the robot'               ignored
+  'halt the robot'                     ignored
+  'please stop now'                    ignored
+  'goose take me to the library'       ignored
+====================================================================================================
+
+The matcher is exact-membership by design (commit 4831676): a substring match on "stop"
+fires on "stop" inside any sentence, and this loop hears everything the room says. The
+phrasings it does not catch are the trade the team chose, and they are listed above so the
+choice is visible rather than assumed - the deleted helper used to claim the opposite.
+
+git grep -n containsStopWord -- app/src :
+    (no hits: the stale helper and its test are gone)
+
+git grep -n STOP_WORDS -- app/src :
+    (no hits: the stale helper and its test are gone)

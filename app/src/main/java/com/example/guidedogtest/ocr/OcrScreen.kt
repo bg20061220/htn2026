@@ -50,9 +50,15 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.example.guidedogtest.Drive
+import com.example.guidedogtest.MotorSettings
+import com.example.guidedogtest.WheelSpeeds
+import com.example.guidedogtest.voice.SensorSnapshot
 import com.example.guidedogtest.voice.VoicePriority
 import kotlinx.coroutines.delay
+
+/** Bench log for the three boxes: their states, the decision, and how fast it runs. */
+private const val WATCHDOG_INTERVAL_MS = 50L
+const val DECISION_LOG_TAG = "Avoidance"
 
 @Composable
 fun OcrScreen(
@@ -60,13 +66,15 @@ fun OcrScreen(
     speakObstacleAlert: (String) -> Boolean = { false },
     speakAvoidanceAlert: (String, VoicePriority) -> Boolean = { _, _ -> false },
     robotConnected: Boolean = false,
+    motorSettings: MotorSettings = MotorSettings(),
     initialAutonomousEnabled: Boolean = false,
     routeNavigationActive: Boolean = false,
     desiredRouteDirection: DesiredTravelDirection = DesiredTravelDirection.FORWARD,
     emergencyStopSignal: Long = 0L,
     onAutonomousAvoidanceEnabled: (Boolean) -> Unit = {},
-    onAutonomousFrame: (String?) -> Unit = {},
     onAvoidanceDecision: (AvoidanceDecision) -> Unit = {},
+    /** The scene, reduced to what the conversation may state. Fired with every decision. */
+    onSceneSnapshot: (SensorSnapshot) -> Unit = {},
 ) {
     val context = LocalContext.current
     DisposableEffect(context) {
@@ -76,7 +84,6 @@ fun OcrScreen(
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         onDispose {
             onAutonomousAvoidanceEnabled(false)
-            onAutonomousFrame(Drive.STOP_FRAME)
             if (previous != null) activity.requestedOrientation = previous
         }
     }
@@ -89,6 +96,23 @@ fun OcrScreen(
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted -> cameraPermissionGranted = granted }
+
+    // Camera refused while the host expects the depth layer to be driving: nothing can see the path,
+    // and the car must stand still and say so instead of leaving the host holding a stale decision
+    // that looks like "nothing wrong". This is the one path into the depth layer that never reaches
+    // the controller at all - the camera content is not composed without permission.
+    LaunchedEffect(cameraPermissionGranted, initialAutonomousEnabled) {
+        if (!cameraPermissionGranted && initialAutonomousEnabled) {
+            onAvoidanceDecision(
+                AvoidanceDecision(
+                    AvoidanceState.STOPPED,
+                    WheelSpeeds(0, 0),
+                    "STOP: CAMERA PERMISSION",
+                    stopReason = AvoidanceStop.SENSING_UNAVAILABLE,
+                )
+            )
+        }
+    }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -118,13 +142,14 @@ fun OcrScreen(
                     speakObstacleAlert = speakObstacleAlert,
                     speakAvoidanceAlert = speakAvoidanceAlert,
                     robotConnected = robotConnected,
+                    motorSettings = motorSettings,
                     initialAutonomousEnabled = initialAutonomousEnabled,
                     routeNavigationActive = routeNavigationActive,
                     desiredRouteDirection = desiredRouteDirection,
                     emergencyStopSignal = emergencyStopSignal,
                     onAutonomousAvoidanceEnabled = onAutonomousAvoidanceEnabled,
-                    onAutonomousFrame = onAutonomousFrame,
                     onAvoidanceDecision = onAvoidanceDecision,
+                    onSceneSnapshot = onSceneSnapshot,
                     modifier = Modifier.weight(1f)
                 )
             } else {
@@ -153,13 +178,14 @@ private fun OcrCameraContent(
     speakObstacleAlert: (String) -> Boolean,
     speakAvoidanceAlert: (String, VoicePriority) -> Boolean,
     robotConnected: Boolean,
+    motorSettings: MotorSettings,
     initialAutonomousEnabled: Boolean,
     routeNavigationActive: Boolean,
     desiredRouteDirection: DesiredTravelDirection,
     emergencyStopSignal: Long,
     onAutonomousAvoidanceEnabled: (Boolean) -> Unit,
-    onAutonomousFrame: (String?) -> Unit,
     onAvoidanceDecision: (AvoidanceDecision) -> Unit,
+    onSceneSnapshot: (SensorSnapshot) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var frameResult by remember { mutableStateOf(OcrFrameResult()) }
@@ -167,8 +193,12 @@ private fun OcrCameraContent(
     var cameraError by remember { mutableStateOf<String?>(null) }
     var depthStatus by remember { mutableStateOf(ArDepthStatus()) }
     var autonomousEnabled by remember { mutableStateOf(initialAutonomousEnabled) }
-    var avoidanceDecision by remember { mutableStateOf(AvoidanceDecision(AvoidanceState.IDLE, com.example.guidedogtest.WheelSpeeds(0, 0), "AUTO OFF")) }
-    var obstacleAlertsEnabled by remember { mutableStateOf(false) }
+    var avoidanceDecision by remember { mutableStateOf(AvoidanceDecision(AvoidanceState.IDLE, WheelSpeeds(0, 0), "AUTO OFF")) }
+    // On by default: a guide dog that only warns when someone remembers to switch warnings on is not
+    // a guide dog. The switch and the distance slider stay for the bench.
+    var obstacleAlertsEnabled by remember { mutableStateOf(true) }
+    var decisionCount = 0
+    var decisionLogMillis = System.currentTimeMillis()
     var warningDistanceMeters by remember { mutableStateOf(2f) }
     var lastObstacleAlert by remember { mutableStateOf<String?>(null) }
     var rawSceneAwareness by remember { mutableStateOf<SceneAwarenessResult?>(null) }
@@ -179,7 +209,10 @@ private fun OcrCameraContent(
     val obstacleAlertManager = remember {
         ObstacleAlertManager(speak = speakObstacleAlert)
     }
-    val avoidanceController = remember { ObstacleAvoidanceController() }
+    // The controller reads the page's values on every decision instead of capturing them when the
+    // dialog opened, so a number changed on the Configure Robot page applies to the next frame.
+    val currentMotorSettings by androidx.compose.runtime.rememberUpdatedState(motorSettings)
+    val avoidanceController = remember { ObstacleAvoidanceController(tuning = { currentMotorSettings }) }
     val avoidanceSpeechManager = remember { AvoidanceSpeechManager(speak = speakAvoidanceAlert) }
 
     LaunchedEffect(emergencyStopSignal) {
@@ -187,33 +220,85 @@ private fun OcrCameraContent(
             autonomousEnabled = false
             avoidanceDecision = AvoidanceDecision(
                 AvoidanceState.STOPPED,
-                com.example.guidedogtest.WheelSpeeds(0, 0),
+                WheelSpeeds(0, 0),
                 "EMERGENCY STOP"
             )
             onAutonomousAvoidanceEnabled(false)
-            onAutonomousFrame(Drive.STOP_FRAME)
         }
     }
 
+    // What the depth layer should steer towards. A route owns the direction while it is running; a
+    // spoken turn or "go forward" carries its own intent in the same field, and stand-alone autonomy
+    // (the AUTO switch, no route, no command) walks forward. A STOP here means "nobody has asked for
+    // a direction", which is why it only counts as a hold while a route is following.
+    val effectiveDirection = when {
+        routeNavigationActive -> desiredRouteDirection
+        desiredRouteDirection == DesiredTravelDirection.STOP -> DesiredTravelDirection.FORWARD
+        else -> desiredRouteDirection
+    }
+
     fun applyAvoidance(scene: SceneAwarenessResult? = rawSceneAwareness) {
+        val updateStartedNanos = System.nanoTime()
         avoidanceDecision = avoidanceController.update(
             scene = scene,
             enabled = autonomousEnabled,
             cameraAvailable = depthStatus.sessionActive,
             depthAvailable = depthStatus.depthActive,
             robotConnected = robotConnected,
-            desiredDirection = desiredRouteDirection,
+            desiredDirection = effectiveDirection,
         )
-        onAutonomousFrame(if (autonomousEnabled) avoidanceDecision.wheelSpeeds.frame() else null)
+        // Bench log: the decision cost and the rate the boxes are being read at, rate-limited to one
+        // line a second so measuring it is not most of the cost.
+        decisionCount++
+        val nowMillis = System.currentTimeMillis()
+        if (nowMillis - decisionLogMillis >= 1_000L) {
+            val seconds = (nowMillis - decisionLogMillis) / 1000.0
+            android.util.Log.d(
+                DECISION_LOG_TAG,
+                "boxes L=%s(%s) C=%s(%s) R=%s(%s) -> %s  %.1f/s  decide %.2f ms".format(
+                    scene?.leftState, scene?.leftDistanceMeters?.let { "%.1f".format(it) } ?: "--",
+                    scene?.centerState, scene?.centerDistanceMeters?.let { "%.1f".format(it) } ?: "--",
+                    scene?.rightState, scene?.rightDistanceMeters?.let { "%.1f".format(it) } ?: "--",
+                    avoidanceDecision.action, decisionCount / seconds,
+                    (System.nanoTime() - updateStartedNanos) / 1_000_000.0,
+                ),
+            )
+            decisionCount = 0
+            decisionLogMillis = nowMillis
+        }
         onAvoidanceDecision(avoidanceDecision)
+        // What the conversation is told, from the same scene the safety controller just decided on:
+        // the assistant and the motors cannot disagree about what is in front of the robot.
+        onSceneSnapshot(
+            (scene ?: SceneAwarenessResult()).toSensorSnapshot(
+                isMoving = autonomousEnabled && avoidanceDecision.state.isDriving()
+            )
+        )
         if (autonomousEnabled) avoidanceSpeechManager.consider(avoidanceDecision, scene)
     }
 
+    // The dialog's copy of the autonomy flag follows the screen that owns it, in both directions.
+    // A spoken command or a manual button can take the motors back outside this dialog, and this
+    // mirror is what stops the panel still claiming AUTO: ON with a motor readout of 0/0 while the
+    // manual command is what the car is actually driving.
     LaunchedEffect(initialAutonomousEnabled, routeNavigationActive) {
-        if (initialAutonomousEnabled || routeNavigationActive) {
-            autonomousEnabled = true
-            onAutonomousAvoidanceEnabled(true)
-            applyAvoidance()
+        val wanted = initialAutonomousEnabled || routeNavigationActive
+        when {
+            wanted && !autonomousEnabled -> {
+                autonomousEnabled = true
+                onAutonomousAvoidanceEnabled(true)
+                applyAvoidance()
+            }
+            !wanted && autonomousEnabled -> {
+                autonomousEnabled = false
+                avoidanceSpeechManager.reset()
+                avoidanceDecision = AvoidanceDecision(
+                    AvoidanceState.IDLE,
+                    WheelSpeeds(0, 0),
+                    "AUTO OFF"
+                )
+                onAutonomousAvoidanceEnabled(false)
+            }
         }
     }
 
@@ -230,11 +315,10 @@ private fun OcrCameraContent(
                 robotConnected = robotConnected,
             )?.let {
                 avoidanceDecision = it
-                onAutonomousFrame(it.wheelSpeeds.frame())
                 onAvoidanceDecision(it)
                 avoidanceSpeechManager.consider(it, rawSceneAwareness)
             }
-            delay(100L)
+            delay(WATCHDOG_INTERVAL_MS)
         }
     }
 
@@ -272,7 +356,15 @@ private fun OcrCameraContent(
                 onObjectDetections = { objectDetections = it; cameraError = null },
                 onSceneAwareness = {
                     rawSceneAwareness = it
-                    depthVisualization = visualizationStabilizer.accept(it)
+                    val visualization = visualizationStabilizer.accept(it)
+                    depthVisualization = visualization
+                    android.util.Log.d(
+                        DECISION_LOG_TAG,
+                        "scene -> ui: plane=%s empty=%s timestamp=%s states L=%s C=%s R=%s, display=%s".format(
+                            it.supportPlaneDetected, it.depthEmpty, it.depthTimestampNanos != null,
+                            it.leftState, it.centerState, it.rightState, visualization.state,
+                        ),
+                    )
                     applyAvoidance(it)
                 },
                 onStatus = {
@@ -361,8 +453,8 @@ private fun OcrCameraContent(
                     onAutonomousAvoidanceEnabled(enabled)
                     if (!enabled) {
                         avoidanceSpeechManager.reset()
-                        avoidanceDecision = AvoidanceDecision(AvoidanceState.IDLE, com.example.guidedogtest.WheelSpeeds(0, 0), "AUTO OFF")
-                        onAutonomousFrame(null)
+                        avoidanceDecision = AvoidanceDecision(AvoidanceState.IDLE, WheelSpeeds(0, 0), "AUTO OFF")
+                        onAutonomousAvoidanceEnabled(false)
                     } else {
                         applyAvoidance()
                     }
@@ -371,19 +463,19 @@ private fun OcrCameraContent(
         }
         Text("AUTO: ${if (autonomousEnabled) "ON" else "OFF"} • Action: ${avoidanceDecision.action}")
         Text("NAVIGATION: ${if (routeNavigationActive) "ACTIVE" else "INACTIVE"}", style = MaterialTheme.typography.labelSmall)
-        Text("Desired route direction: $desiredRouteDirection", style = MaterialTheme.typography.labelSmall)
+        Text("Target direction: $effectiveDirection", style = MaterialTheme.typography.labelSmall)
         Text("Local action: ${avoidanceDecision.action}", style = MaterialTheme.typography.labelSmall)
-        Text("Target corridor: ${avoidanceDecision.targetCorridorOffset?.let { String.format(java.util.Locale.US, "%+.2f", it) } ?: "--"}", style = MaterialTheme.typography.labelSmall)
+        Text("Off middle: ${avoidanceDecision.offMiddle?.let { String.format(java.util.Locale.US, "%+.2f", it) } ?: "--"}", style = MaterialTheme.typography.labelSmall)
         Text("Motor output: L: ${avoidanceDecision.wheelSpeeds.left}  R: ${avoidanceDecision.wheelSpeeds.right}", style = MaterialTheme.typography.labelSmall)
         Button(onClick = {
             autonomousEnabled = false
             onAutonomousAvoidanceEnabled(false)
             avoidanceDecision = AvoidanceDecision(
                 AvoidanceState.STOPPED,
-                com.example.guidedogtest.WheelSpeeds(0, 0),
+                WheelSpeeds(0, 0),
                 "MANUAL STOP"
             )
-            onAutonomousFrame(Drive.STOP_FRAME)
+            onAutonomousAvoidanceEnabled(false)
         }) {
             Text("STOP")
         }
@@ -484,13 +576,31 @@ private fun SceneAwarenessPanel(result: SceneAwarenessResult?) {
     val value = result ?: SceneAwarenessResult()
     Text(
         text = buildString {
-            appendLine("Support: ${if (value.supportPlaneDetected) "TRACKED" else "UNKNOWN"}")
-            appendLine("Drop: ${if (value.dropDetected) "DETECTED" else "none"}")
-            val corridor = value.freeCorridor
-            appendLine(if (corridor == null) "Free corridor: NONE" else {
-                val side = when { corridor.centerOffset < -0.12f -> "LEFT"; corridor.centerOffset > 0.12f -> "RIGHT"; else -> "CENTER" }
-                "Free corridor: $side (${corridor.widthColumns} columns)"
-            })
+            appendLine(
+                when {
+                    value.supportPlaneDetected ->
+                        "Support: TRACKED   Drop: ${if (value.dropDetected) "DETECTED" else "none"}"
+                    // Two faults, two answers: an empty depth frame is ARCore not measuring at all,
+                    // a full one with no floor in it is where the camera is pointed.
+                    value.depthEmpty ->
+                        "Support: NO DEPTH from the camera (ARCore is returning empty frames) - " +
+                            "nothing can be judged, so the robot will not drive. Close and reopen the " +
+                            "camera view, or check the depth module."
+                    else ->
+                        "Support: NO FLOOR IN THE DEPTH IMAGE - ARCore's depth covers the middle of " +
+                            "the camera picture, so if the floor is only along the bottom edge it is " +
+                            "not measured at all. Tilt the phone down until the floor is in the " +
+                            "middle of the preview. Nothing is judged from the distances below."
+                }
+            )
+            SceneAwarenessAnalyzer.ZONES.forEach { zone ->
+                val distance = value.distanceOf(zone)
+                appendLine(
+                    "${zone.name.take(1)}: ${value.stateOf(zone)}" +
+                        (distance?.let { String.format(java.util.Locale.US, " %.2f m", it) } ?: "") +
+                        (if (value.hasDrop(zone)) " DROP" else "")
+                )
+            }
             append("Recommendation: ${value.recommendedDirection}")
         },
         modifier = Modifier
@@ -512,41 +622,63 @@ private fun SceneZoneOverlay(
     val blockedColor = Color(0xFFC62828)
     val unknownColor = Color(0xFF607D8B)
     Canvas(modifier = modifier) {
-        val left = size.width * SceneAwarenessAnalyzer.REGION_LEFT
-        val top = size.height * SceneAwarenessAnalyzer.REGION_TOP
-        val regionWidth = size.width *
-            (SceneAwarenessAnalyzer.REGION_RIGHT - SceneAwarenessAnalyzer.REGION_LEFT)
-        val columns = sceneAwareness?.gridColumns ?: SceneAwarenessAnalyzer.GRID_COLUMNS
-        val rows = sceneAwareness?.gridRows ?: SceneAwarenessAnalyzer.GRID_ROWS
-        val cellWidth = regionWidth / columns
-        val regionHeight = size.height *
-            (SceneAwarenessAnalyzer.REGION_BOTTOM - SceneAwarenessAnalyzer.REGION_TOP)
-        val cellHeight = regionHeight / rows
-        val cells = sceneAwareness?.cells.orEmpty()
-        cells.forEach { cell ->
-            val color = when (cell.state) {
-                OccupancyState.FREE -> clearColor
-                OccupancyState.CAUTION -> cautionColor
-                OccupancyState.OCCUPIED, OccupancyState.DROP -> blockedColor
-                OccupancyState.UNKNOWN -> unknownColor
+        val top = size.height * SceneAwarenessAnalyzer.ZONE_TOP
+        val height = size.height * (SceneAwarenessAnalyzer.ZONE_BOTTOM - SceneAwarenessAnalyzer.ZONE_TOP)
+        val labelPaint = android.graphics.Paint().apply {
+            isAntiAlias = true
+            color = android.graphics.Color.WHITE
+            textSize = 34f
+            setShadowLayer(6f, 0f, 0f, android.graphics.Color.BLACK)
+        }
+        SceneAwarenessAnalyzer.ZONES.forEach { zone ->
+            val left = size.width * SceneAwarenessAnalyzer.zoneLeft(zone)
+            val width = size.width *
+                (SceneAwarenessAnalyzer.zoneRight(zone) - SceneAwarenessAnalyzer.zoneLeft(zone))
+            val state = sceneAwareness?.stateOf(zone) ?: SceneZoneState.UNKNOWN
+            val dropped = sceneAwareness?.hasDrop(zone) == true
+            val color = when {
+                dropped -> blockedColor
+                state == SceneZoneState.CLEAR -> clearColor
+                state == SceneZoneState.CAUTION -> cautionColor
+                state == SceneZoneState.BLOCKED -> blockedColor
+                else -> unknownColor
             }
+            // Above the floor line is where an obstacle has to be to matter, so that is the part
+            // drawn as an active box. Below it is floor - support, deliberately not detection - and it
+            // is drawn as a thin, dim strip rather than three big boxes that are mostly pavement.
+            val floorY = sceneAwareness?.floorLineFraction?.let { size.height * it } ?: (top + height)
+            val activeHeight = (floorY - top).coerceAtLeast(1f)
             drawRect(
                 color = color.copy(alpha = 0.12f),
-                topLeft = Offset(left + cell.column * cellWidth, top + cell.row * cellHeight),
-                size = Size(cellWidth, cellHeight)
+                topLeft = Offset(left, top),
+                size = Size(width, activeHeight),
             )
             drawRect(
-                color = color.copy(alpha = 0.75f),
-                topLeft = Offset(left + cell.column * cellWidth, top + cell.row * cellHeight),
-                size = Size(cellWidth, cellHeight),
-                style = Stroke(width = 1.dp.toPx())
+                color = color.copy(alpha = 0.85f),
+                topLeft = Offset(left, top),
+                size = Size(width, activeHeight),
+                style = Stroke(width = 3.dp.toPx()),
             )
-        }
-        sceneAwareness?.freeCorridor?.let { corridor ->
-            drawRect(
-                color = clearColor.copy(alpha = 0.9f),
-                topLeft = Offset(left + corridor.startColumn * cellWidth, top),
-                size = Size(corridor.widthColumns * cellWidth, 4.dp.toPx()),
+            if (floorY < top + height) {
+                drawRect(
+                    color = color.copy(alpha = 0.30f),
+                    topLeft = Offset(left, floorY),
+                    size = Size(width, top + height - floorY),
+                    style = Stroke(width = 1.dp.toPx()),
+                )
+            }
+            val distance = sceneAwareness?.distanceOf(zone)
+            val label = buildString {
+                append(zone.name.first())
+                append(' ')
+                append(distance?.let { String.format(java.util.Locale.US, "%.1f m", it) } ?: "--")
+                if (dropped) append(" DROP")
+            }
+            drawContext.canvas.nativeCanvas.drawText(
+                label,
+                left + 12.dp.toPx(),
+                top + 40.dp.toPx(),
+                labelPaint,
             )
         }
     }

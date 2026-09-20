@@ -1,0 +1,119 @@
+COMMAND (both runs):
+  ./gradlew.bat :app:connectedDebugAndroidTest \
+      -Pandroid.testInstrumentationRunnerArguments.class=com.example.guidedogtest.RouteFetchThreadingTest --console=plain
+DEVICE  : SM-G991W (Samsung SM-G991W, Android 15), attached over adb
+CAPTURED: 2026-09-20T04:12:14-04:00
+
+----------------------------------------
+WHAT THIS PROVES
+The report was "the voice module is not able to set and start a route on its own, it says no route was
+found". RoutesApi.fetchRoute is a blocking HttpURLConnection POST, and the spoken path called it from
+`viewModelScope.launch` - Dispatchers.Main.immediate. On a device that is
+NetworkOnMainThreadException, thrown *inside* the caller's `catch (e: Exception)`, which turned every
+confirmed spoken destination into the spoken "Sorry, I couldn't calculate the route."
+
+The throwaway test (app/src/androidTest/java/com/example/guidedogtest/RouteFetchThreadingTest.kt, since
+deleted) made the route fetch from the main thread exactly as the voice path did, and was run twice on
+the same device: A with fetchRoute as the plain blocking function it was, B with the dispatcher inside
+it. The test source is identical in both runs - `runBlocking(Dispatchers.Main)` compiles against either
+signature - so the only difference between A and B is where the fetch runs.
+
+----------------------------------------
+A - plain `fun fetchRoute`, called from the main thread (the shape the spoken path used)
+----------------------------------------
+Execute com.example.guidedogtest.RouteFetchThreadingTest.aRouteFetchedFromTheMainThreadComesBack: FAILED
+android.os.NetworkOnMainThreadException
+at android.os.StrictMode$AndroidBlockGuardPolicy.onNetwork(StrictMode.java: android.os.NetworkOnMainThreadException
+at android.os.StrictMode$AndroidBlockGuardPolicy.onNetwork(StrictMode.java:1686)
+at java.net.Inet6AddressImpl.lookupHostByName(Inet6AddressImpl.java:115)
+at java.net.Inet6AddressImpl.lookupAllHostAddr(Inet6AddressImpl.java:103)
+at java.net.InetAddress.getAllByName(InetAddress.java:1152)
+at com.android.okhttp.Dns$1.lookup(Dns.java:41)
+at com.android.okhttp.internal.http.RouteSelector.resetNextInetSocketAddress(RouteSelector.java:178)
+at com.android.okhttp.internal.http.RouteSelector.nextProxy(RouteSelector.java:144)
+at com.android.okhttp.internal.http.RouteSelector.next(RouteSelector.java:86)
+at com.android.okhttp.internal.http.StreamAllocation.findConnection(StreamAllocation.java:176)
+at com.android.okhttp.internal.http.StreamAllocation.findHealthyConnection(StreamAllocation.java:128)
+at com.android.okhttp.internal.http.StreamAllocation.newStream(StreamAllocation.java:97)
+at com.android.okhttp.internal.http.HttpEngine.connect(HttpEngine.java:289)
+at com.android.okhttp.internal.http.HttpEngine.sendRequest(HttpEngine.java:232)
+at com.android.okhttp.internal.huc.HttpURLConnectionImpl.execute(HttpURLConnectionImpl.java:465)
+at com.android.okhttp.internal.huc.HttpURLConnectionImpl.connect(HttpURLConnectionImpl.java:131)
+at com.android.okhttp.internal.huc.HttpURLConnectionImpl.getOutputStream(HttpURLConnectionImpl.java:262)
+at com.android.okhttp.internal.huc.DelegatingHttpsURLConnection.getOutputStream(DelegatingHttpsURLConnection.java:219)
+at com.android.okhttp.internal.huc.HttpsURLConnectionImpl.getOutputStream(HttpsURLConnectionImpl.java:30)
+at com.example.guidedogtest.RoutesApi.fetchRoute(RoutesApi.kt:99)
+at com.example.guidedogtest.RouteFetchThreadingTest$aRouteFetchedFromTheMainThreadComesBack$plan$1.invokeSuspend(RouteFetchThreadingTest.kt:38)
+at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:34)
+at kotlinx.coroutines.DispatchedTask.run(DispatchedTask.kt:100)
+at android.os.Handler.handleCallback(Handler.java:959)
+at android.os.Handler.dispatchMessage(Handler.java:100)
+at android.os.Looper.loopOnce(Looper.java:257)
+at android.os.Looper.loop(Looper.java:342)
+at android.app.ActivityThread.main(ActivityThread.java:9634)
+at java.lang.reflect.Method.invoke(Native Method)
+at com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:619)
+at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:929)
+
+android.os.NetworkOnMainThreadException
+at android.os.StrictMode$AndroidBlockGuardPolicy.onNetwork(StrictMode.java:1686)
+at java.net.Inet6AddressImpl.lookupHostByName(Inet6AddressImpl.java:115)
+at java.net.Inet6AddressImpl.lookupAllHostAddr(Inet6AddressImpl.java:103)
+at java.net.InetAddress.getAllByName(InetAddress.java:1152)
+at com.android.okhttp.Dns$1.lookup(Dns.java:41)
+at com.android.okhttp.internal.http.RouteSelector.resetNextInetSocketAddress(RouteSelector.java:178)
+at com.android.okhttp.internal.http.RouteSelector.nextProxy(RouteSelector.java:144)
+at com.android.okhttp.internal.http.RouteSelector.next(RouteSelector.java:86)
+at com.android.okhttp.internal.http.StreamAllocation.findConnection(StreamAllocation.java:176)
+at com.android.okhttp.internal.http.StreamAllocation.findHealthyConnection(StreamAllocation.java:128)
+at com.android.okhttp.internal.http.StreamAllocation.newStream(StreamAllocation.java:97)
+at com.android.okhttp.internal.http.HttpEngine.connect(HttpEngine.java:289)
+at com.android.okhttp.internal.http.HttpEngine.sendRequest(HttpEngine.java:232)
+at com.android.okhttp.internal.huc.HttpURLConnectionImpl.execute(HttpURLConnectionImpl.java:465)
+at com.android.okhttp.internal.huc.HttpURLConnectionImpl.connect(HttpURLConnectionImpl.java:131)
+at com.android.okhttp.internal.huc.HttpURLConnectionImpl.getOutputStream(HttpURLConnectionImpl.java:262)
+at com.android.okhttp.internal.huc.DelegatingHttpsURLConnection.getOutputStream(DelegatingHttpsURLConnection.java:219)
+at com.android.okhttp.internal.huc.HttpsURLConnectionImpl.getOutputStream(HttpsURLConnectionImpl.java:30)
+at com.example.guidedogtest.RoutesApi.fetchRoute(RoutesApi.kt:99)
+at com.example.guidedogtest.RouteFetchThreadingTest$aRouteFetchedFromTheMainThreadComesBack$plan$1.invokeSuspend(RouteFetchThreadingTest.kt:38)
+at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:34)
+at kotlinx.coroutines.DispatchedTask.run(DispatchedTask.kt:100)
+at android.os.Handler.handleCallback(Handler.java:959)
+at android.os.Handler.dispatchMessage(Handler.java:100)
+at android.os.Looper.loopOnce(Looper.java:257)
+at android.os.Looper.loop(Looper.java:342)
+at android.app.ActivityThread.main(ActivityThread.java:9634)
+at java.lang.reflect.Method.invoke(Native Method)
+at com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:619)
+at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:929)
+
+Tests on SM-G991W - 15 failed: There was 1 failure(s).
+
+----------------------------------------
+B - `suspend fun fetchRoute` = withContext(Dispatchers.IO), called from the main thread
+----------------------------------------
+Starting 1 tests on SM-G991W - 15
+Finished 1 tests on SM-G991W - 15
+BUILD SUCCESSFUL in 20s
+androidTest report: com.example.guidedogtest.RouteFetchThreadingTest tests=1 failures=0 errors=0
+
+The test's own output, from the device's logcat (a passing test's stdout is not in the gradle report):
+
+09-20 04:10:35.138 31676 31704 I System.out: ROUTE FROM THE MAIN THREAD: 3 steps, 771 m
+
+The same request from a laptop, with the body and field mask transcribed out of RoutesApi.kt by
+review/harness/voice_route_check.py, returns the same walk:
+
+HTTP 200: 3 steps, 771 m, duration 635s
+
+----------------------------------------
+WHY "NO ROUTE WAS FOUND" WAS NEVER THE API'S ANSWER
+The endpoint, the key, the request body and the destination are all fine: both the device run and the
+laptop run come back with a walking route for the same pair of points. What failed was asking for it
+from the main thread. The A trace ends in `android.app.ActivityThread.main` via `Looper.loop` - that is
+the app's own main looper thread, which is where the voice path's coroutine ran; the frame above it is
+`RoutesApi.fetchRoute(RoutesApi.kt:99)`, the `getOutputStream()` on the connection.
+
+This log is the evidence for the fix. The permanent guard is review/harness/voice_route_check.py: it
+fails if the dispatcher leaves `fetchRoute` or if a call site starts wrapping it again - the manual
+wrapper at the typed-destination button is exactly what hid this from that path for so long.

@@ -2,6 +2,8 @@ package com.example.guidedogtest
 
 import android.util.Log
 import com.google.android.gms.maps.model.LatLng
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.net.HttpURLConnection
@@ -47,8 +49,12 @@ data class RoutePlan(
 /**
  * Google Routes API client - the only route source in the app.
  *
- * One `computeRoutes` call in, a [RoutePlan] out. Runs on a background thread - call it from a
- * coroutine on Dispatchers.IO.
+ * One `computeRoutes` call in, a [RoutePlan] out. The blocking call and the dispatcher it needs live
+ * behind this function rather than at the call site: a caller that forgets to leave the main thread
+ * does not fail to compile, it throws [android.os.NetworkOnMainThreadException] *inside* whatever
+ * `try` is around it. That is how the spoken-destination path used to answer every confirmed
+ * destination with "Sorry, I couldn't calculate the route" while the typed-destination button, which
+ * wrapped the same call in `withContext(Dispatchers.IO)`, worked.
  *
  * WALK is the travel mode because this robot follows footpaths, and the field mask is explicit
  * because the API requires one and it also keeps the response small.
@@ -66,11 +72,11 @@ object RoutesApi {
             "routes.duration," +
             "routes.polyline.encodedPolyline"
 
-    fun fetchRoute(
+    suspend fun fetchRoute(
         apiKey: String,
         origin: GeoPoint,
         destination: RouteDestination,
-    ): RoutePlan {
+    ): RoutePlan = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("origin", JSONObject().put("location", latLng(origin)))
             .put("destination", destinationBody(destination))
@@ -104,7 +110,7 @@ object RoutesApi {
             error("Routes API $code: ${text.take(180)}")
         }
 
-        return parse(text, destination)
+        parse(text, destination)
     }
 
     /** Visible for tests: turns a computeRoutes response into the plan the app uses. */

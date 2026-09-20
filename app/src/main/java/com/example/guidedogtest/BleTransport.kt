@@ -58,18 +58,27 @@ class BleTransport(
 
     private val gattCallback = object : BluetoothGattCallback() {
 
+        /** A superseded connection's callbacks must not touch the state of the live one. */
+        private fun isCurrent(connection: BluetoothGatt) = connection === gatt
+
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            if (!isCurrent(gatt)) return
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 onStatus("BLE connected, discovering services")
                 gatt.discoverServices()
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 onStatus("BLE disconnected")
                 commandChar = null
+                // A dropped link has to give the client back: Android holds the connection's
+                // resources until close(), and the next CONNECT press starts a fresh scan anyway.
+                gatt.close()
+                this@BleTransport.gatt = null
                 main.post { onConnected(false) }
             }
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (!isCurrent(gatt)) return
             val service = gatt.getService(SERVICE_UUID)
             val rx = service?.getCharacteristic(RX_UUID)
             val tx = service?.getCharacteristic(TX_UUID)
@@ -98,6 +107,7 @@ class BleTransport(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic,
         ) {
+            if (!isCurrent(gatt)) return
             @Suppress("DEPRECATION")
             val value = characteristic.value ?: return
             feed(value)

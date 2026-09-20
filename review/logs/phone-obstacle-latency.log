@@ -1,0 +1,26 @@
+PHONE MEASUREMENT — obstacle path, Samsung SM-G991W (adb logcat -s DepthCamera Boxes Avoidance)
+CAPTURED: 2026-09-20T08:15:28Z
+================================================================================================
+
+BEFORE (4 Hz analysis behind the detector, polling transmit loop):
+  D/DepthCamera: vision 160x90  5.9-6.1 fps  (every 167 ms)  camera copy 0.45-2.51 ms  depth copy 6.17-19.36 ms
+  app CPU (top, camera view open): 344 %
+  boxes read: ~4/s  (250 ms analysis throttle on top of the 150 ms frame gate)
+  decision -> frame on the wire: waits for the next tick, up to 50 ms driving / 200 ms listening
+
+AFTER (boxes read before the heavy work, 100 ms frame gate, event-driven transmit):
+  D/DepthCamera: vision 160x90  7.6-9.8 fps  (every 100-133 ms)  camera copy 0.53-2.54 ms  depth copy 0.20-0.93 ms
+  D/Boxes:       boxes read 7.6-8.9/s  (throttled 0, failed 0)
+  app CPU (top, camera view open): 220 %
+  decide: 0.06 ms (D/Avoidance)
+  decision -> frame on the wire: same composition frame
+
+  => depth copy ~15x cheaper, boxes read 2x more often, CPU down by a third, and the wait for
+     the next transmit tick is gone: what is left of the reaction time is ARCore's own depth
+     frame interval (100-133 ms) plus one composition frame.
+
+NOT RE-MEASURED: the build after this (7x7 samples per box, lower support-row minimum, and the
+floor-model diagnostic in the Boxes log) — the phone disconnected before it could be installed.
+Repeat with: adb install -r app/build/outputs/apk/debug/app-debug.apk, open CAMERA VIEW, and
+watch the 'support rows N of 3 ...' field in adb logcat -s Boxes.
+================================================================================================

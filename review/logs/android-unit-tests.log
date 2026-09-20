@@ -1,0 +1,18 @@
+COMMAND: ./gradlew.bat :app:testDebugUnitTest --console=plain
+CAPTURED: 2026-09-20T09:01:39Z
+----------------------------------------
+===== per-class summary from app/build/test-results/testDebugUnitTest/*.xml =====
+com.example.guidedogtest.AvoidanceSpeechManagerTest        tests=4    failures=0   errors=0   skipped=0
+com.example.guidedogtest.DepthVisualizationStabilizerTest  tests=4    failures=0   errors=0   skipped=0
+com.example.guidedogtest.DriveArbiterTest                  tests=7    failures=0   errors=0   skipped=0
+com.example.guidedogtest.DriveTest                         tests=2    failures=0   errors=0   skipped=0
+com.example.guidedogtest.EmergencyStopMatcherTest          tests=2    failures=0   errors=0   skipped=0
+com.example.guidedogtest.HeadingTest                       tests=6    failures=0   errors=0   skipped=0
+com.example.guidedogtest.MotorSettingsTest                 tests=5    failures=0   errors=0   skipped=0
+com.example.guidedogtest.ObstacleAvoidanceControllerTest   tests=34   failures=0   errors=0   skipped=0
+com.example.guidedogtest.RouteFollowerTest                 tests=19   failures=0   errors=0   skipped=0
+com.example.guidedogtest.RoutesApiTest                     tests=5    failures=0   errors=0   skipped=0
+com.example.guidedogtest.SceneAwarenessAnalyzerTest        tests=12   failures=0   errors=0   skipped=0
+com.example.guidedogtest.ocr.SceneSnapshotTest             tests=4    failures=0   errors=0   skipped=0
+com.example.guidedogtest.voice.VoiceCommandTest            tests=8    failures=0   errors=0   skipped=0
+TOTAL classes=13 tests=112 failures=0 errors=0 skipped=0

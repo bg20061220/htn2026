@@ -1,6 +1,7 @@
 package com.example.guidedogtest.ocr
 
 import android.content.Context
+import android.util.Log
 import android.graphics.Bitmap
 import android.graphics.PointF
 import android.graphics.RectF
@@ -25,6 +26,9 @@ data class CameraYuvFrame(
 
 data class PlaneCopy(val bytes: ByteArray, val rowStride: Int, val pixelStride: Int)
 
+/** Bench log for the safety path: how often the three boxes are actually read, and why not. */
+const val ANALYSIS_LOG_TAG = "Boxes"
+
 class ArCoreVisionProcessor(
     context: Context,
     private val onText: (OcrFrameResult) -> Unit,
@@ -39,13 +43,63 @@ class ArCoreVisionProcessor(
     private val sceneAwarenessAnalyzer = SceneAwarenessAnalyzer()
     private var lastOcrMillis = 0L
 
+    private var analyses = 0
+    private var throttled = 0
+    private var failures = 0
+    private var lastAnalysisError: String? = null
+    private var analysisLogMillis = System.currentTimeMillis()
+
+    /** How often the boxes are actually read, once a second, with whatever is going wrong. */
+    private fun logAnalysisRate() {
+        val now = System.currentTimeMillis()
+        if (now - analysisLogMillis < 1_000L) return
+        val seconds = (now - analysisLogMillis) / 1000.0
+        Log.d(
+            ANALYSIS_LOG_TAG,
+            "boxes read %.1f/s (throttled %d, failed %d) | %s | %s | %s%s".format(
+                analyses / seconds, throttled, failures,
+                sceneAwarenessAnalyzer.lastDepthReport,
+                sceneAwarenessAnalyzer.lastSampleReport,
+                sceneAwarenessAnalyzer.lastFitReport,
+                lastAnalysisError?.let { "  last error: $it" } ?: "",
+            ),
+        )
+        analyses = 0
+        throttled = 0
+        failures = 0
+        analysisLogMillis = now
+    }
+
+    /**
+     * The three boxes, on their own: no camera image, no detector, no OCR, nothing else on this call.
+     *
+     * Kept separate so the safety path can be fed the moment a depth frame exists, whether or not the
+     * heavy work is busy or even possible. It costs a fraction of a millisecond.
+     */
+    fun submitDepth(depth: DepthFrame) {
+        // Guarded: a frame that cannot be read must leave the boxes unreadable - which stops the car -
+        // rather than killing the analysis for the rest of the session, which is what an exception on
+        // the GL thread used to do (it was caught and reported once, and then the path was silently
+        // dead).
+        try {
+            val scene = sceneAwarenessAnalyzer.analyzeIfDue(depth)
+            if (scene != null) {
+                analyses++
+                onSceneAwareness(scene)
+            } else {
+                throttled++
+            }
+        } catch (error: Exception) {
+            failures++
+            lastAnalysisError = "${error.javaClass.simpleName}: ${error.message}"
+        }
+        logAnalysisRate()
+    }
+
     fun submit(frame: CameraYuvFrame, rotation: Int, depth: DepthFrame?) {
         if (!busy.compareAndSet(false, true)) return
         executor.execute {
             try {
-                if (depth != null) {
-                    sceneAwarenessAnalyzer.analyzeIfDue(depth)?.let(onSceneAwareness)
-                }
                 val bitmap = frame.toBitmap()
                 val uprightWidth = if (rotation == 90 || rotation == 270) frame.height else frame.width
                 val uprightHeight = if (rotation == 90 || rotation == 270) frame.width else frame.height

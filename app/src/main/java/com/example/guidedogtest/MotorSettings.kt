@@ -1,6 +1,7 @@
 package com.example.guidedogtest
 
 import android.content.Context
+import kotlin.math.roundToInt
 
 /** One command's wheel speeds: raw PWM per side, -255..255. */
 data class WheelSpeeds(val left: Int, val right: Int) {
@@ -20,9 +21,50 @@ object MotorTuning {
     const val MANUAL_TURN_INNER_LEFT = 190
     const val MANUAL_TURN_INNER_RIGHT = 195
 
+    /**
+     * How much of the tuned turn pair an **automatic** pivot uses. 1.0 would be exactly the numbers on
+     * the Configure Robot page.
+     *
+     * This is the one knob for "the turns are too aggressive": it scales the obstacle pivot, the
+     * route's turn, a spoken "turn left/right" and the warm-up swivel together, so they stay in
+     * proportion instead of one of them being tuned at a time.
+     *
+     * Do not go below about 0.55 without knowing why: the pair is floored at the motor minimum, so
+     * past that point both wheels sit at 110, the pivot loses the asymmetry this chassis needs to
+     * rotate on the spot rather than curve, and the easing ramp stops showing at all.
+     */
+    const val PIVOT_FRACTION = 0.6f
+
+    /** The tuned pair for one direction, at [PIVOT_FRACTION], floored so the wheels still turn. */
+    fun pivotPair(turn: WheelSpeeds): WheelSpeeds = WheelSpeeds(
+        enforceMinimumLeft((turn.left * PIVOT_FRACTION).roundToInt()),
+        enforceMinimumRight((turn.right * PIVOT_FRACTION).roundToInt()),
+    )
+
     fun enforceMinimum(value: Int): Int = enforceMinimumFor(value, MIN_EFFECTIVE_MOTOR_SPEED)
     fun enforceMinimumLeft(value: Int): Int = enforceMinimumFor(value, MIN_EFFECTIVE_LEFT_POWER)
     fun enforceMinimumRight(value: Int): Int = enforceMinimumFor(value, MIN_EFFECTIVE_RIGHT_POWER)
+
+    /**
+     * Lays one arc on an already-calibrated pair: positive [bias] turns right, by moving PWM from
+     * the right wheel to the left one.
+     *
+     * The giving wheel stops at its floor rather than below it - a wheel commanded under the
+     * deadband does not turn at all, and then the arc is not the one asked for - and past that point
+     * the far wheel keeps rising on its own. So a larger lateral error always buys a larger arc, all
+     * the way up to the pivot threshold, instead of a dead spot where more error buys nothing.
+     *
+     * One implementation for both callers: the depth controller steering its own cautious pair, and
+     * [DriveArbiter] laying the controller's bias on whatever pair the route is driving.
+     */
+    fun steered(base: WheelSpeeds, bias: Int): WheelSpeeds = if (bias == 0) {
+        base
+    } else {
+        WheelSpeeds(
+            enforceMinimumLeft(Geo.clampPwm(base.left + bias)),
+            enforceMinimumRight(Geo.clampPwm(base.right - bias)),
+        )
+    }
 
     private fun enforceMinimumFor(value: Int, minimum: Int): Int = when {
         value == 0 -> 0
