@@ -22,6 +22,7 @@ sealed class RobotCommand {
     object Go : RobotCommand()
     /** Drive straight ahead, latched, at the tuned FORWARD wheel pair. */
     object Forward : RobotCommand()
+    object Backward : RobotCommand()
     data class Turn(val direction: String) : RobotCommand()
     data class Navigate(val destination: String) : RobotCommand()
 }
@@ -38,8 +39,9 @@ sealed class RobotCommand {
 fun localCommandFor(transcript: String): RobotCommand? =
     when (transcript.trim().lowercase().trim('.')) {
         "stop", "halt" -> RobotCommand.Stop
-        "go", "start", "start following" -> RobotCommand.Go
-        "forward", "go forward", "walk forward", "straight", "straight ahead" -> RobotCommand.Forward
+        "go", "start", "start following", "continue", "continue route", "keep going" -> RobotCommand.Go
+        "forward", "go forward", "move forward", "walk forward", "straight", "straight ahead" -> RobotCommand.Forward
+        "backward", "go backward", "move backward", "back", "reverse" -> RobotCommand.Backward
         "turn left", "left" -> RobotCommand.Turn("left")
         "turn right", "right" -> RobotCommand.Turn("right")
         else -> null
@@ -53,6 +55,21 @@ fun localCommandFor(transcript: String): RobotCommand? =
  */
 fun containsWakeWord(transcript: String): Boolean =
     transcript.lowercase().contains(WAKE_WORD)
+
+fun commandAfterWakeWord(transcript: String): String {
+    val lower = transcript.lowercase()
+    val index = lower.indexOf(WAKE_WORD)
+    if (index < 0) return ""
+    return transcript.substring(index + WAKE_WORD.length).trim().trimStart(',', '.', ':', ';', '-', '!', '?').trim()
+}
+
+/** Fast local destination extraction; Places still resolves the returned text. */
+fun destinationRequestFor(transcript: String): String? {
+    val cleaned = transcript.trim().trimEnd('.', '?', '!')
+    val prefixes = listOf("take me to ", "navigate to ", "go to ", "bring me to ", "walk to ")
+    val prefix = prefixes.firstOrNull { cleaned.startsWith(it, ignoreCase = true) } ?: return null
+    return cleaned.substring(prefix.length).trim().takeIf { it.isNotEmpty() }
+}
 
 /**
  * Does this transcript contain a word that must stop the robot?

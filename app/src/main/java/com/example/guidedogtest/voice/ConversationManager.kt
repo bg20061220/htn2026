@@ -80,7 +80,7 @@ class ConversationManager(
 
     private val wakeWordDetector = WakeWordDetector(
         context = context,
-        onWakeWordDetected = { onWakeWordDetected() },
+        onWakeWordDetected = { inlineCommand -> onWakeWordDetected(inlineCommand) },
         onStopWordDetected = { onStopWord() },
     )
 
@@ -156,7 +156,7 @@ class ConversationManager(
         return true
     }
 
-    private fun onWakeWordDetected() {
+    private fun onWakeWordDetected(inlineCommand: String) {
         if (_state.value != ConversationState.LISTENING_FOR_WAKE_WORD) {
             // During request processing this recognizer is safety-only; ordinary wake words wait.
             wakeWordDetector.resume()
@@ -164,6 +164,11 @@ class ConversationManager(
         }
         Log.d(TAG, "Wake word detected")
         wakeWordDetector.pause()
+        if (inlineCommand.isNotBlank()) {
+            _state.value = ConversationState.THINKING
+            onTranscript(inlineCommand)
+            return
+        }
         _state.value = ConversationState.ACK_PLAYING
         speak("Hi, how can I help?") {
             Log.d(TAG, "Ack finished, starting command capture")
@@ -245,11 +250,20 @@ class ConversationManager(
             _state.value = ConversationState.SPEAKING
             val ack = when (safetyCommand) {
                 RobotCommand.Stop -> "Stopping now."
-                RobotCommand.Forward -> "Going forward."
+                RobotCommand.Forward -> "Moving forward."
+                RobotCommand.Backward -> "Moving backward."
                 is RobotCommand.Turn -> "Turning ${safetyCommand.direction}."
                 else -> "Okay, going."
             }
-            speak(ack) { listenForCommand(withTimeout = true) }
+            // A completed command starts a fresh wake-word turn. The only time we keep the
+            // one-shot recognizer open is while resolving a destination confirmation.
+            speak(ack) { returnToWakeWordListening() }
+            return
+        }
+
+        destinationRequestFor(transcript)?.let { destination ->
+            _state.value = ConversationState.THINKING
+            activeRequestJob = viewModelScope.launch { handleNavigateRequest(destination) }
             return
         }
 
@@ -273,7 +287,7 @@ class ConversationManager(
                     onCommand(command)
                 }
                 _state.value = ConversationState.SPEAKING
-                speak(reply.speech) { listenForCommand(withTimeout = true) }
+                speak(reply.speech) { returnToWakeWordListening() }
             }
         }
     }
@@ -333,7 +347,7 @@ class ConversationManager(
                     speak(
                         "Okay, heading to ${place.name}. That's about ${formatDistance(plan.distanceMeters)}, " +
                             "roughly ${formatDuration(plan.durationSeconds)} on foot."
-                    ) { listenForCommand(withTimeout = true) }
+                    ) { returnToWakeWordListening() }
                 } catch (e: Exception) {
                     Log.d(TAG, "Route computation failed: ${e.message}")
                     _state.value = ConversationState.SPEAKING
@@ -363,6 +377,7 @@ class ConversationManager(
             Log.d(TAG, "Speak done: $text")
             if (generation == speechGeneration) onDone()
         }
+
     }
 
     private fun returnToWakeWordListening() {

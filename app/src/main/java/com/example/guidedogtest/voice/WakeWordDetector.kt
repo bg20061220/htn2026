@@ -26,7 +26,7 @@ private const val TAG = "WakeWordDetector"
  */
 class WakeWordDetector(
     private val context: Context,
-    private val onWakeWordDetected: () -> Unit,
+    private val onWakeWordDetected: (String) -> Unit,
     /**
      * Called the moment a stop word is heard, whatever else is going on and without the wake word:
      * the loop is listening to everything anyway, so a stop does not have to be asked for twice.
@@ -40,6 +40,8 @@ class WakeWordDetector(
 
     /** True once a stop has been fired for the utterance being listened to, so partials don't repeat it. */
     private var stopSent = false
+    private var pendingWakeTranscript = ""
+    private val firePendingWakeWord = Runnable { fireWakeWord(pendingWakeTranscript) }
 
     private val listener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {}
@@ -61,7 +63,7 @@ class WakeWordDetector(
                 return
             }
             if (containsWakeWord(transcriptOf(results))) {
-                fireWakeWord()
+                fireWakeWord(transcriptOf(results))
             } else {
                 consecutiveErrors = 0
                 restartWithBackoff()
@@ -70,8 +72,15 @@ class WakeWordDetector(
 
         override fun onPartialResults(partialResults: Bundle?) {
             if (heardEmergencyStop(partialResults)) return
-            if (containsWakeWord(transcriptOf(partialResults))) {
-                fireWakeWord()
+            val transcript = transcriptOf(partialResults)
+            val inlineCommand = commandAfterWakeWord(transcript)
+            // Do not interrupt a bare "Hey Goose" with the acknowledgement while the user is
+            // still saying the command. Partial results may be used for a complete local command,
+            // but destination phrases wait for the final transcript.
+            if (containsWakeWord(transcript) && localCommandFor(inlineCommand) != null) {
+                pendingWakeTranscript = transcript
+                handler.removeCallbacks(firePendingWakeWord)
+                handler.postDelayed(firePendingWakeWord, WAKE_PARTIAL_DEBOUNCE_MS)
             }
         }
     }
@@ -94,11 +103,12 @@ class WakeWordDetector(
         return true
     }
 
-    private fun fireWakeWord() {
+    private fun fireWakeWord(transcript: String) {
+        if (!isActive) return
         isActive = false
         handler.removeCallbacksAndMessages(null)
         recognizer?.stopListening()
-        onWakeWordDetected()
+        onWakeWordDetected(commandAfterWakeWord(transcript))
     }
 
     private fun restartWithBackoff() {
@@ -139,6 +149,10 @@ class WakeWordDetector(
         isActive = false
         handler.removeCallbacksAndMessages(null)
         recognizer?.stopListening()
+    }
+
+    private companion object {
+        const val WAKE_PARTIAL_DEBOUNCE_MS = 650L
     }
 
     fun resume() {

@@ -6,6 +6,12 @@ import com.example.guidedogtest.MotorTuning
 import kotlin.math.roundToInt
 
 enum class AvoidanceState { IDLE, FORWARD, SLOW, TURN_LEFT, TURN_RIGHT, STOPPED }
+enum class AvoidancePhase {
+    NORMAL_NAVIGATION,
+    AVOIDING_OBSTACLE,
+    PASSING_OBSTACLE,
+    RETURNING_TO_ROUTE,
+}
 enum class DesiredTravelDirection { FORWARD, LEFT, RIGHT, PIVOT_LEFT, PIVOT_RIGHT, STOP }
 
 data class AvoidanceDecision(
@@ -13,6 +19,7 @@ data class AvoidanceDecision(
     val wheelSpeeds: WheelSpeeds,
     val action: String,
     val targetCorridorOffset: Float? = null,
+    val phase: AvoidancePhase = AvoidancePhase.NORMAL_NAVIGATION,
 )
 
 /** Depth-driven local navigation. It produces wheel targets but never talks to a transport. */
@@ -23,6 +30,8 @@ class ObstacleAvoidanceController(
     private var lastDepthTimestampNanos: Long? = null
     private var lastDepthArrivalMillis = Long.MIN_VALUE
     private var lastCorridorOffset: Float? = null
+    private var phase = AvoidancePhase.NORMAL_NAVIGATION
+    private var avoidanceSide: Int? = null
 
     fun update(
         scene: SceneAwarenessResult?,
@@ -32,7 +41,11 @@ class ObstacleAvoidanceController(
         robotConnected: Boolean,
         desiredDirection: DesiredTravelDirection = DesiredTravelDirection.FORWARD,
     ): AvoidanceDecision {
-        if (!enabled) return stop(AvoidanceState.IDLE, "AUTO OFF")
+        if (!enabled) {
+            phase = AvoidancePhase.NORMAL_NAVIGATION
+            avoidanceSide = null
+            return stop(AvoidanceState.IDLE, "AUTO OFF")
+        }
         if (!robotConnected) return stop(reason = "STOP: ROBOT DISCONNECTED")
         if (!cameraAvailable) return stop(reason = "STOP: CAMERA UNAVAILABLE")
         if (!depthAvailable || scene?.depthTimestampNanos == null) {
@@ -77,12 +90,51 @@ class ObstacleAvoidanceController(
     private fun decide(scene: SceneAwarenessResult, desiredDirection: DesiredTravelDirection): AvoidanceDecision {
         if (desiredDirection == DesiredTravelDirection.STOP) return stop(reason = "STOP: ROUTE HOLD")
         if (scene.dropDetected || scene.cells.any { it.state == OccupancyState.DROP }) return stop(reason = "STOP: DROP")
-        val corridor = chooseCorridor(scene, desiredDirection) ?: return stop(reason = "STOP: NO SAFE CORRIDOR")
+        val blockedAhead = scene.centerState == SceneZoneState.BLOCKED
+        val phaseAtStart = phase
+        if (blockedAhead && (
+            phase != AvoidancePhase.AVOIDING_OBSTACLE ||
+                avoidanceSide == null ||
+                chooseSideCorridor(scene, avoidanceSide ?: 0) == null
+            )
+        ) {
+            avoidanceSide = chooseAvoidanceSide(scene)
+            if (avoidanceSide == null) return stop(reason = "STOP: NO SAFE CORRIDOR")
+            phase = AvoidancePhase.AVOIDING_OBSTACLE
+        } else if (!blockedAhead && phase == AvoidancePhase.AVOIDING_OBSTACLE) {
+            phase = AvoidancePhase.PASSING_OBSTACLE
+        } else if (!blockedAhead && phase == AvoidancePhase.PASSING_OBSTACLE) {
+            phase = AvoidancePhase.RETURNING_TO_ROUTE
+        }
+
+        val corridor = when (phase) {
+            AvoidancePhase.AVOIDING_OBSTACLE, AvoidancePhase.PASSING_OBSTACLE ->
+                avoidanceSide?.let { chooseSideCorridor(scene, it) }
+                    ?: chooseCorridor(scene, desiredDirection)
+            AvoidancePhase.RETURNING_TO_ROUTE, AvoidancePhase.NORMAL_NAVIGATION ->
+                chooseCorridor(scene, desiredDirection)
+        } ?: return stop(reason = "STOP: NO SAFE CORRIDOR")
         val corridorOffset = corridor.centerOffset.coerceIn(-1f, 1f)
         lastCorridorOffset = corridorOffset
+        val routeTarget = routeTarget(desiredDirection)
+
+        if (phaseAtStart == AvoidancePhase.RETURNING_TO_ROUTE &&
+            kotlin.math.abs(corridorOffset - routeTarget) <= RETURN_ROUTE_TOLERANCE
+        ) {
+            phase = AvoidancePhase.NORMAL_NAVIGATION
+            avoidanceSide = null
+        }
+
+        val steeringDirection = if (
+            phase == AvoidancePhase.AVOIDING_OBSTACLE
+        ) {
+            if ((avoidanceSide ?: 0) < 0) DesiredTravelDirection.LEFT else DesiredTravelDirection.RIGHT
+        } else {
+            desiredDirection
+        }
         if (desiredDirection == DesiredTravelDirection.PIVOT_LEFT && scene.centerState != SceneZoneState.BLOCKED) return pivotLeft(corridorOffset)
         if (desiredDirection == DesiredTravelDirection.PIVOT_RIGHT && scene.centerState != SceneZoneState.BLOCKED) return pivotRight(corridorOffset)
-        val routeBias = when (desiredDirection) {
+        val routeBias = when (steeringDirection) {
             DesiredTravelDirection.LEFT -> -ROUTE_STEERING_BIAS
             DesiredTravelDirection.RIGHT -> ROUTE_STEERING_BIAS
             else -> 0f
@@ -91,7 +143,7 @@ class ObstacleAvoidanceController(
         val centered = kotlin.math.abs(offset) <= CENTER_DEADBAND
         if (centered && scene.centerState == SceneZoneState.CLEAR) {
             state = AvoidanceState.FORWARD
-            return AvoidanceDecision(state, wheels(AUTO_CRUISE_POWER, AUTO_CRUISE_POWER - AUTO_RIGHT_TRIM), "FORWARD", offset)
+            return decision(AvoidanceState.FORWARD, wheels(AUTO_CRUISE_POWER, AUTO_CRUISE_POWER - AUTO_RIGHT_TRIM), "FORWARD", offset)
         }
 
         // A large lateral target needs a pivot. The direction remains latched while its corridor
@@ -106,11 +158,43 @@ class ObstacleAvoidanceController(
         val bias = (kotlin.math.abs(offset) * MAX_SMOOTH_STEERING_BIAS).roundToInt()
             .coerceIn(MIN_SMOOTH_STEERING_BIAS, MAX_SMOOTH_STEERING_BIAS)
         return when {
-            offset < -CENTER_DEADBAND -> AvoidanceDecision(state, wheels(AUTO_CAUTION_POWER - bias, AUTO_CAUTION_POWER), "STEER LEFT", offset)
-            offset > CENTER_DEADBAND -> AvoidanceDecision(state, wheels(AUTO_CAUTION_POWER, AUTO_CAUTION_POWER - bias), "STEER RIGHT", offset)
-            else -> AvoidanceDecision(state, wheels(AUTO_CAUTION_POWER, AUTO_CAUTION_POWER - AUTO_SLOW_RIGHT_TRIM), "SLOW FORWARD", offset)
+            offset < -CENTER_DEADBAND -> decision(state, wheels(AUTO_CAUTION_POWER - bias, AUTO_CAUTION_POWER), "STEER LEFT", offset)
+            offset > CENTER_DEADBAND -> decision(state, wheels(AUTO_CAUTION_POWER, AUTO_CAUTION_POWER - bias), "STEER RIGHT", offset)
+            else -> decision(state, wheels(AUTO_CAUTION_POWER, AUTO_CAUTION_POWER - AUTO_SLOW_RIGHT_TRIM), "SLOW FORWARD", offset)
         }
     }
+
+    private fun decision(state: AvoidanceState, wheels: WheelSpeeds, action: String, offset: Float) =
+        AvoidanceDecision(state, wheels, action, offset, phase)
+
+    private fun routeTarget(desired: DesiredTravelDirection): Float = when (desired) {
+        DesiredTravelDirection.LEFT, DesiredTravelDirection.PIVOT_LEFT -> -ROUTE_TURN_TARGET_OFFSET
+        DesiredTravelDirection.RIGHT, DesiredTravelDirection.PIVOT_RIGHT -> ROUTE_TURN_TARGET_OFFSET
+        else -> 0f
+    }
+
+    private fun chooseAvoidanceSide(scene: SceneAwarenessResult): Int? {
+        val left = chooseSideCorridor(scene, -1)
+        val right = chooseSideCorridor(scene, 1)
+        return when {
+            scene.leftState == SceneZoneState.BLOCKED && right != null -> 1
+            scene.rightState == SceneZoneState.BLOCKED && left != null -> -1
+            left == null && right == null -> null
+            right == null -> -1
+            left == null -> 1
+            corridorScore(right) >= corridorScore(left) -> 1
+            else -> -1
+        }
+    }
+
+    private fun chooseSideCorridor(scene: SceneAwarenessResult, side: Int): FreeCorridor? =
+        scene.freeCorridors
+            .ifEmpty { listOfNotNull(scene.freeCorridor) }
+            .filter { it.centerOffset * side > CENTER_DEADBAND }
+            .maxByOrNull(::corridorScore)
+
+    private fun corridorScore(corridor: FreeCorridor): Float =
+        corridor.widthColumns * corridor.clearanceMeters
 
     private fun chooseCorridor(scene: SceneAwarenessResult, desired: DesiredTravelDirection): FreeCorridor? {
         val candidates = scene.freeCorridors.ifEmpty { listOfNotNull(scene.freeCorridor) }
@@ -131,17 +215,17 @@ class ObstacleAvoidanceController(
 
     private fun pivotLeft(offset: Float): AvoidanceDecision {
         state = AvoidanceState.TURN_LEFT
-        return AvoidanceDecision(state, wheels(-AUTO_PIVOT_POWER, AUTO_PIVOT_POWER), "PIVOT LEFT", offset)
+        return decision(state, wheels(-AUTO_PIVOT_POWER, AUTO_PIVOT_POWER), "PIVOT LEFT", offset)
     }
 
     private fun pivotRight(offset: Float): AvoidanceDecision {
         state = AvoidanceState.TURN_RIGHT
-        return AvoidanceDecision(state, wheels(AUTO_PIVOT_POWER, -AUTO_PIVOT_POWER), "PIVOT RIGHT", offset)
+        return decision(state, wheels(AUTO_PIVOT_POWER, -AUTO_PIVOT_POWER), "PIVOT RIGHT", offset)
     }
 
     private fun stop(newState: AvoidanceState = AvoidanceState.STOPPED, reason: String): AvoidanceDecision {
         state = newState
-        return AvoidanceDecision(state, WheelSpeeds(0, 0), reason)
+        return AvoidanceDecision(state, WheelSpeeds(0, 0), reason, phase = phase)
     }
 
     private fun wheels(left: Int, right: Int) = WheelSpeeds(
@@ -173,5 +257,6 @@ class ObstacleAvoidanceController(
         private const val WIDTH_SCORE_BONUS = 0.025f
         private const val CLEARANCE_SCORE_BONUS = 0.05f
         private const val CORRIDOR_SWITCH_HYSTERESIS = 0.15f
+        private const val RETURN_ROUTE_TOLERANCE = 0.18f
     }
 }

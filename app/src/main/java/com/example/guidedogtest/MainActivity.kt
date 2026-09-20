@@ -327,19 +327,35 @@ fun NavigationScreen() {
 
                             is RobotCommand.Turn -> {
                                 stopFollowing()
-                                avoidanceActive = false
-                                command = if (robotCommand.direction.lowercase().contains("left")) {
-                                    "LEFT"
-                                } else {
-                                    "RIGHT"
-                                }
+                                command = "STOP"
+                                autonomousFrame = Drive.STOP_FRAME
+                                desiredRouteDirection =
+                                    if (robotCommand.direction.lowercase().contains("left")) {
+                                        DesiredTravelDirection.PIVOT_LEFT
+                                    } else {
+                                        DesiredTravelDirection.PIVOT_RIGHT
+                                    }
+                                avoidanceActive = true
+                                showCameraView = true
                             }
 
                             // Straight ahead, on the tuned FORWARD pair. No destination needed, so
                             // this is the one that works on the bench with no route loaded.
                             RobotCommand.Forward -> {
                                 stopFollowing()
-                                command = "FORWARD"
+                                command = "STOP"
+                                autonomousFrame = Drive.STOP_FRAME
+                                desiredRouteDirection = DesiredTravelDirection.FORWARD
+                                avoidanceActive = true
+                                showCameraView = true
+                            }
+
+                            RobotCommand.Backward -> {
+                                stopFollowing()
+                                // The camera only measures the forward corridor. Never issue a
+                                // blind reverse command when the required rear depth is absent.
+                                halt(sayIt = false)
+                                pendingAnnouncement = "I can't move backward safely without rear depth."
                             }
 
                             // The route for a spoken destination arrives on voiceRoute; the

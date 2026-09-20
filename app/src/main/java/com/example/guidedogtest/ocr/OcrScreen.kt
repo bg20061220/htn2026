@@ -168,7 +168,7 @@ private fun OcrCameraContent(
     var depthStatus by remember { mutableStateOf(ArDepthStatus()) }
     var autonomousEnabled by remember { mutableStateOf(initialAutonomousEnabled) }
     var avoidanceDecision by remember { mutableStateOf(AvoidanceDecision(AvoidanceState.IDLE, com.example.guidedogtest.WheelSpeeds(0, 0), "AUTO OFF")) }
-    var obstacleAlertsEnabled by remember { mutableStateOf(false) }
+    var obstacleAlertsEnabled by remember { mutableStateOf(true) }
     var warningDistanceMeters by remember { mutableStateOf(2f) }
     var lastObstacleAlert by remember { mutableStateOf<String?>(null) }
     var rawSceneAwareness by remember { mutableStateOf<SceneAwarenessResult?>(null) }

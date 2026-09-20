@@ -13,11 +13,14 @@ enum class ObstacleDirection(val speech: String) {
 data class ObstacleAlert(
     val label: String,
     val direction: ObstacleDirection,
-    val distanceMeters: Float
+    val distanceMeters: Float?
 ) {
     val speech: String
-        get() = "${label.replaceFirstChar { it.titlecase(Locale.getDefault()) }} ${direction.speech}, " +
-            String.format(Locale.getDefault(), "%.1f metres.", distanceMeters)
+        get() = buildString {
+            append("${label.replaceFirstChar { it.titlecase(Locale.getDefault()) }} ${direction.speech}")
+            distanceMeters?.let { append(String.format(Locale.getDefault(), ", %.1f metres", it)) }
+            append('.')
+        }
 }
 
 /** Selects at most one useful alert; it does not own audio or camera resources. */
@@ -25,7 +28,7 @@ class ObstacleAlertManager(
     private val clockMillis: () -> Long = SystemClock::elapsedRealtime,
     private val speak: (String) -> Boolean
 ) {
-    private data class SpokenAlert(val timeMillis: Long, val distanceMeters: Float)
+    private data class SpokenAlert(val timeMillis: Long, val distanceMeters: Float?)
 
     private val spokenByKey = mutableMapOf<String, SpokenAlert>()
     private var lastAnyAlertMillis = Long.MIN_VALUE
@@ -40,22 +43,24 @@ class ObstacleAlertManager(
         if (lastAnyAlertMillis != Long.MIN_VALUE && now - lastAnyAlertMillis < GLOBAL_COOLDOWN_MS) return null
 
         val candidates = detections.mapNotNull { detection ->
-            val distance = detection.distanceMeters
-                ?.takeIf { it.isFinite() && it > 0f && it <= warningDistanceMeters }
-                ?: return@mapNotNull null
+            val distance = detection.distanceMeters?.takeIf { it.isFinite() && it > 0f }
+            if (distance != null && distance > warningDistanceMeters) return@mapNotNull null
+            if (distance == null && detection.confidence < MIN_DISTANCELESS_CONFIDENCE) return@mapNotNull null
             val direction = directionFor(detection.boundingBox.centerX(), frameWidth)
             val alert = ObstacleAlert(detection.label, direction, distance)
             val previous = spokenByKey[key(alert)]
             val repeatAllowed = previous == null ||
                 now - previous.timeMillis >= SAME_OBJECT_COOLDOWN_MS ||
-                (now - previous.timeMillis >= SIGNIFICANT_CHANGE_MIN_DELAY_MS &&
+                (previous.distanceMeters != null && distance != null &&
+                    now - previous.timeMillis >= SIGNIFICANT_CHANGE_MIN_DELAY_MS &&
                     abs(previous.distanceMeters - distance) >= SIGNIFICANT_DISTANCE_CHANGE_METERS)
             alert.takeIf { repeatAllowed }
         }
 
         // Forward-path objects get a modest priority bonus without hiding a much closer side hazard.
         val selected = candidates.minByOrNull {
-            it.distanceMeters + if (it.direction == ObstacleDirection.AHEAD) 0f else SIDE_PRIORITY_PENALTY_METERS
+            (it.distanceMeters ?: warningDistanceMeters) +
+                if (it.direction == ObstacleDirection.AHEAD) 0f else SIDE_PRIORITY_PENALTY_METERS
         } ?: return null
 
         if (!speak(selected.speech)) return null
@@ -88,6 +93,7 @@ class ObstacleAlertManager(
         const val SIGNIFICANT_CHANGE_MIN_DELAY_MS = 3_000L
         const val SIGNIFICANT_DISTANCE_CHANGE_METERS = 0.5f
         const val SIDE_PRIORITY_PENALTY_METERS = 0.4f
+        const val MIN_DISTANCELESS_CONFIDENCE = 0.65f
         const val HISTORY_RETENTION_MS = 60_000L
     }
 }

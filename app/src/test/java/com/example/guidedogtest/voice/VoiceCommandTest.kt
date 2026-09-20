@@ -28,9 +28,17 @@ class VoiceCommandTest {
         // "go" starts following a planned route; "forward" drives without one.
         assertEquals(RobotCommand.Go, localCommandFor("go"))
         assertEquals(RobotCommand.Go, localCommandFor("start following"))
+        assertEquals(RobotCommand.Go, localCommandFor("continue"))
         assertEquals(RobotCommand.Forward, localCommandFor("go forward"))
+        assertEquals(RobotCommand.Forward, localCommandFor("move forward"))
         assertEquals(RobotCommand.Forward, localCommandFor("forward"))
         assertEquals(RobotCommand.Forward, localCommandFor("straight ahead"))
+    }
+
+    @Test fun backwardCommandsAreRecognisedLocally() {
+        assertEquals(RobotCommand.Backward, localCommandFor("backward"))
+        assertEquals(RobotCommand.Backward, localCommandFor("go backward"))
+        assertEquals(RobotCommand.Backward, localCommandFor("reverse"))
     }
 
     @Test
@@ -57,6 +65,14 @@ class VoiceCommandTest {
         assertFalse(containsWakeWord("okay goo"))
         assertFalse(containsWakeWord("hello there"))
         assertFalse(containsWakeWord(""))
+    }
+
+    @Test fun inlineWakeWordCommandAndDestinationsAreExtracted() {
+        assertEquals("take me to the library", commandAfterWakeWord("Hey Goose, take me to the library"))
+        assertEquals("the library", destinationRequestFor("take me to the library"))
+        assertEquals("200 University Avenue", destinationRequestFor("go to 200 University Avenue"))
+        assertEquals("Room 204", destinationRequestFor("take me to Room 204"))
+        assertNull(destinationRequestFor("tell me about Room 204"))
     }
 
     @Test

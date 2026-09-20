@@ -14,10 +14,7 @@ class AvoidanceSpeechManager(
     private var lastSpokenMillis = Long.MIN_VALUE
 
     fun consider(decision: AvoidanceDecision, scene: SceneAwarenessResult?): AvoidanceSpeech? {
-        val message = messageFor(decision, scene) ?: run {
-            if (decision.state == AvoidanceState.FORWARD) lastSignature = "FORWARD"
-            return null
-        }
+        val message = messageFor(decision, scene) ?: return null
         val signature = "${decision.state}:${message.text}"
         val now = clockMillis()
         if (signature == lastSignature) return null
@@ -39,13 +36,22 @@ class AvoidanceSpeechManager(
                 AvoidanceSpeech("Path blocked. Stopping.", VoicePriority.UNSAFE_PATH)
             else -> null
         }
+        if (decision.phase == AvoidancePhase.RETURNING_TO_ROUTE) {
+            return AvoidanceSpeech("Path clear. Continuing.", VoicePriority.AVOIDANCE)
+        }
         return when (decision.state) {
+            AvoidanceState.FORWARD -> AvoidanceSpeech("Moving forward.", VoicePriority.AVOIDANCE)
+            AvoidanceState.SLOW -> when (decision.action) {
+                "STEER LEFT" -> AvoidanceSpeech("Turning left.", VoicePriority.AVOIDANCE)
+                "STEER RIGHT" -> AvoidanceSpeech("Turning right.", VoicePriority.AVOIDANCE)
+                else -> null
+            }
             AvoidanceState.TURN_LEFT -> AvoidanceSpeech(
-                if (scene?.centerState == SceneZoneState.BLOCKED) "Obstacle ahead. Moving left."
-                else "Obstacle on the right. Moving left.", VoicePriority.AVOIDANCE)
+                if (scene?.centerState == SceneZoneState.BLOCKED) "Obstacle ahead. Turning left."
+                else "Obstacle on the right. Turning left.", VoicePriority.AVOIDANCE)
             AvoidanceState.TURN_RIGHT -> AvoidanceSpeech(
-                if (scene?.centerState == SceneZoneState.BLOCKED) "Obstacle ahead. Moving right."
-                else "Obstacle on the left. Moving right.", VoicePriority.AVOIDANCE)
+                if (scene?.centerState == SceneZoneState.BLOCKED) "Obstacle ahead. Turning right."
+                else "Obstacle on the left. Turning right.", VoicePriority.AVOIDANCE)
             else -> null
         }
     }
