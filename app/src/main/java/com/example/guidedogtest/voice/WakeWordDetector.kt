@@ -41,6 +41,19 @@ class WakeWordDetector(
     /** True once a stop has been fired for the utterance being listened to, so partials don't repeat it. */
     private var stopSent = false
 
+    /**
+     * True once the wake word has fired for the utterance being listened to.
+     *
+     * stopListening() doesn't cancel the recognizer outright - it still delivers one more trailing
+     * onResults callback for the same utterance, which usually still contains "goose" and would
+     * otherwise fire the wake word a second time. That second fire lands after the state has already
+     * moved to ACK_PLAYING, so onWakeWordDetected's "not idle" branch resumes this loop's recognizer
+     * right as SpeechCapture is about to start its own - two recognizers fighting for the mic, and
+     * SpeechCapture's losing almost immediately, is exactly what made it feel like there was no time
+     * to speak the actual request.
+     */
+    private var wakeSent = false
+
     private val listener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {}
         override fun onBeginningOfSpeech() {}
@@ -95,6 +108,8 @@ class WakeWordDetector(
     }
 
     private fun fireWakeWord() {
+        if (wakeSent) return
+        wakeSent = true
         isActive = false
         handler.removeCallbacksAndMessages(null)
         recognizer?.stopListening()
@@ -113,6 +128,7 @@ class WakeWordDetector(
         if (!isActive) return
         recognizer?.destroy()
         stopSent = false
+        wakeSent = false
         recognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
             setRecognitionListener(listener)
             startListening(

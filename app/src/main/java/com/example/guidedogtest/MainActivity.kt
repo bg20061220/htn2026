@@ -43,6 +43,7 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.example.guidedogtest.ui.theme.GuideDogTestTheme
 import com.example.guidedogtest.voice.ConversationManager
+import com.example.guidedogtest.voice.ConversationState
 import com.example.guidedogtest.voice.RobotCommand
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
@@ -333,6 +334,12 @@ fun NavigationScreen() {
                                 } else {
                                     "RIGHT"
                                 }
+                                val speeds = motorSettings.speedsFor(command)
+                                Log.d(
+                                    "MainActivity",
+                                    "RobotCommand.Turn(${robotCommand.direction}) -> command=$command " +
+                                        "wheelSpeeds=(${speeds.left}, ${speeds.right})"
+                                )
                             }
 
                             // Straight ahead, on the tuned FORWARD pair. No destination needed, so
@@ -589,7 +596,7 @@ fun NavigationScreen() {
     // manual command. One writer, one path to the motors.
     LaunchedEffect(link.connected) {
 
-        var tick = 0
+        var lastLoggedFrame: String? = null
 
         while (link.connected) {
 
@@ -598,14 +605,30 @@ fun NavigationScreen() {
                 autonomousFrame != null -> autonomousFrame!!
                 else -> motorSettings.speedsFor(command).frame()
             }
+            if (frame != lastLoggedFrame) {
+                Log.d("MainActivity", "Sending motor frame: ${frame.trim()} (command=$command)")
+                lastLoggedFrame = frame
+            }
             link.send(frame)
 
-            if (tick % 4 == 0) {
-                link.send("h500\n")
-            }
+            // Sent every tick, not just every 4th: at the slower 200ms interval
+            // used while listening (below), every-4th-tick would be 800ms,
+            // past the firmware's 500ms stop-if-silent deadline. Every tick is
+            // cheap over serial either way, so there's no reason to gate it.
+            link.send("h500\n")
 
-            tick++
-            delay(50)
+            // Back off the transmit rate while a voice command is actively being
+            // captured: this loop's normal 20Hz cadence, plus UsbTransport's
+            // background serial reader, contends for CPU hard enough on this
+            // hardware to make SpeechRecognizer time out before the user can
+            // speak. The robot is expected to be stationary during a
+            // conversation turn anyway, and 200ms is still well under the
+            // firmware's 500ms stop-if-silent deadline.
+            val transmitIntervalMs = if (
+                conversationState == ConversationState.LISTENING ||
+                conversationState == ConversationState.ACK_PLAYING
+            ) 200L else 50L
+            delay(transmitIntervalMs)
         }
     }
 
