@@ -85,6 +85,7 @@ class ConversationManager(
     )
 
     private var followUpTimeoutJob: Job? = null
+    private var activeRequestJob: Job? = null
 
     // Set while waiting for the user to say yes/no to a proposed
     // destination. Non-null means the next transcript is treated as a
@@ -98,6 +99,7 @@ class ConversationManager(
 
     fun stop() {
         followUpTimeoutJob?.cancel()
+        activeRequestJob?.cancel()
         wakeWordDetector.stop()
         speechCapture.destroy()
         elevenLabsClient.release()
@@ -131,6 +133,11 @@ class ConversationManager(
     }
 
     private fun onWakeWordDetected() {
+        if (_state.value != ConversationState.LISTENING_FOR_WAKE_WORD) {
+            // During request processing this recognizer is safety-only; ordinary wake words wait.
+            wakeWordDetector.resume()
+            return
+        }
         Log.d(TAG, "Wake word detected")
         wakeWordDetector.pause()
         _state.value = ConversationState.ACK_PLAYING
@@ -169,23 +176,45 @@ class ConversationManager(
                 followUpTimeoutJob?.cancel()
                 Log.d(TAG, "SpeechCapture error, returning to wake word listening")
                 returnToWakeWordListening()
-            }
+            },
+            onEmergencyStop = { handleEmergencyStop() },
         )
+    }
+
+    /** No network and no spoken acknowledgement: motor safety wins over the conversation. */
+    private fun handleEmergencyStop() {
+        Log.d(TAG, "Local emergency stop detected")
+        followUpTimeoutJob?.cancel()
+        activeRequestJob?.cancel()
+        activeRequestJob = null
+        pendingDestination = null
+        speechCapture.stopListening()
+        onCommand(RobotCommand.Stop)
+        returnToWakeWordListening()
     }
 
     private fun onTranscript(transcript: String) {
         Log.d(TAG, "Transcript: $transcript")
+        // The one-shot recognizer has finished. Resume the lightweight global safety listener while
+        // local/network processing runs so STOP can cancel an in-flight Groq, Places or Routes job.
+        speechCapture.destroy()
+        wakeWordDetector.resume()
 
         val pending = pendingDestination
         if (pending != null) {
             pendingDestination = null
-            viewModelScope.launch { handleNavigationConfirmation(pending, transcript) }
+            _state.value = ConversationState.THINKING
+            activeRequestJob = viewModelScope.launch { handleNavigationConfirmation(pending, transcript) }
             return
         }
 
         // Local safety-phrase bypass: these must work with zero network
         // dependency, so we short-circuit before ever calling Groq.
-        val safetyCommand = localCommandFor(transcript)
+        val safetyCommand = if (EmergencyStopMatcher.matches(transcript)) {
+            RobotCommand.Stop
+        } else {
+            localCommandFor(transcript)
+        }
 
         if (safetyCommand != null) {
             onCommand(safetyCommand)
@@ -201,7 +230,7 @@ class ConversationManager(
         }
 
         _state.value = ConversationState.THINKING
-        viewModelScope.launch {
+        activeRequestJob = viewModelScope.launch {
             val reply = groqClient.getReply(transcript, sensorProvider(), history)
             Log.d(TAG, "Groq reply: speech=${reply.speech} command=${reply.command}")
 
@@ -302,6 +331,8 @@ class ConversationManager(
 
     private fun speak(text: String, onDone: () -> Unit) {
         Log.d(TAG, "Speaking: $text")
+        // Never feed ElevenLabs output into the emergency matcher: pause recognition before audio.
+        wakeWordDetector.pause()
         _lastSpoken.value = text
         elevenLabsClient.speak(text) {
             Log.d(TAG, "Speak done: $text")

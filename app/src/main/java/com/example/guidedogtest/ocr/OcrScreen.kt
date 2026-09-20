@@ -1,14 +1,12 @@
 package com.example.guidedogtest.ocr
 
 import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
+import android.content.pm.ActivityInfo
+import android.content.ContextWrapper
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.Preview
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -17,9 +15,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -47,21 +47,33 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.google.ar.core.ArCoreApk
-import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.min
+import com.example.guidedogtest.Drive
+import kotlinx.coroutines.delay
 
 @Composable
 fun OcrScreen(
     onClose: () -> Unit,
-    speakObstacleAlert: (String) -> Boolean = { false }
+    speakObstacleAlert: (String) -> Boolean = { false },
+    robotConnected: Boolean = false,
+    emergencyStopSignal: Long = 0L,
+    onAutonomousAvoidanceEnabled: (Boolean) -> Unit = {},
+    onAutonomousFrame: (String?) -> Unit = {},
 ) {
     val context = LocalContext.current
+    DisposableEffect(context) {
+        val activity = generateSequence(context) { (it as? ContextWrapper)?.baseContext }
+            .filterIsInstance<Activity>().firstOrNull()
+        val previous = activity?.requestedOrientation
+        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        onDispose {
+            onAutonomousAvoidanceEnabled(false)
+            onAutonomousFrame(Drive.STOP_FRAME)
+            if (previous != null) activity.requestedOrientation = previous
+        }
+    }
     var cameraPermissionGranted by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
@@ -87,7 +99,7 @@ fun OcrScreen(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
-                    text = "OCR / Computer Vision",
+                    text = "ROBOT CAMERA",
                     style = MaterialTheme.typography.titleLarge
                 )
                 Button(onClick = onClose) { Text("CLOSE") }
@@ -98,6 +110,10 @@ fun OcrScreen(
             if (cameraPermissionGranted) {
                 OcrCameraContent(
                     speakObstacleAlert = speakObstacleAlert,
+                    robotConnected = robotConnected,
+                    emergencyStopSignal = emergencyStopSignal,
+                    onAutonomousAvoidanceEnabled = onAutonomousAvoidanceEnabled,
+                    onAutonomousFrame = onAutonomousFrame,
                     modifier = Modifier.weight(1f)
                 )
             } else {
@@ -124,19 +140,64 @@ fun OcrScreen(
 @Composable
 private fun OcrCameraContent(
     speakObstacleAlert: (String) -> Boolean,
+    robotConnected: Boolean,
+    emergencyStopSignal: Long,
+    onAutonomousAvoidanceEnabled: (Boolean) -> Unit,
+    onAutonomousFrame: (String?) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var frameResult by remember { mutableStateOf(OcrFrameResult()) }
     var objectDetections by remember { mutableStateOf<List<VisionObjectDetection>>(emptyList()) }
     var cameraError by remember { mutableStateOf<String?>(null) }
-    var useDepthMode by remember { mutableStateOf(true) }
     var depthStatus by remember { mutableStateOf(ArDepthStatus()) }
+    var autonomousEnabled by remember { mutableStateOf(false) }
+    var avoidanceDecision by remember { mutableStateOf(AvoidanceDecision(AvoidanceState.IDLE, com.example.guidedogtest.WheelSpeeds(0, 0), "AUTO OFF")) }
     var obstacleAlertsEnabled by remember { mutableStateOf(false) }
     var warningDistanceMeters by remember { mutableStateOf(2f) }
     var lastObstacleAlert by remember { mutableStateOf<String?>(null) }
     var sceneAwareness by remember { mutableStateOf<SceneAwarenessResult?>(null) }
     val obstacleAlertManager = remember {
         ObstacleAlertManager(speak = speakObstacleAlert)
+    }
+    val avoidanceController = remember { ObstacleAvoidanceController() }
+
+    LaunchedEffect(emergencyStopSignal) {
+        if (emergencyStopSignal > 0L) {
+            autonomousEnabled = false
+            avoidanceDecision = AvoidanceDecision(
+                AvoidanceState.STOPPED,
+                com.example.guidedogtest.WheelSpeeds(0, 0),
+                "EMERGENCY STOP"
+            )
+            onAutonomousAvoidanceEnabled(false)
+            onAutonomousFrame(Drive.STOP_FRAME)
+        }
+    }
+
+    fun applyAvoidance(scene: SceneAwarenessResult? = sceneAwareness) {
+        avoidanceDecision = avoidanceController.update(
+            scene = scene,
+            enabled = autonomousEnabled,
+            cameraAvailable = depthStatus.sessionActive,
+            depthAvailable = depthStatus.depthActive,
+            robotConnected = robotConnected,
+        )
+        onAutonomousFrame(if (autonomousEnabled) avoidanceDecision.wheelSpeeds.frame() else null)
+    }
+
+    LaunchedEffect(autonomousEnabled, robotConnected, depthStatus.sessionActive, depthStatus.depthActive) {
+        while (autonomousEnabled) {
+            avoidanceController.watchdog(
+                enabled = true,
+                cameraAvailable = depthStatus.sessionActive,
+                depthAvailable = depthStatus.depthActive,
+                robotConnected = robotConnected,
+            )?.let {
+                avoidanceDecision = it
+                onAutonomousFrame(it.wheelSpeeds.frame())
+            }
+            delay(100L)
+        }
     }
 
     LaunchedEffect(objectDetections, frameResult.imageWidth, obstacleAlertsEnabled, warningDistanceMeters) {
@@ -152,37 +213,34 @@ private fun OcrCameraContent(
         }
     }
 
-    Column(modifier = modifier.fillMaxWidth()) {
-        if (useDepthMode && ArCoreApk.getInstance().checkAvailability(LocalContext.current) == ArCoreApk.Availability.SUPPORTED_INSTALLED) {
-            ArCoreDepthPreview(
+    Row(modifier = modifier.fillMaxSize()) {
+        ArCoreDepthPreview(
                 frameResult = frameResult,
                 objectDetections = objectDetections,
                 sceneAwareness = sceneAwareness,
                 onResult = { frameResult = it; cameraError = null },
                 onObjectDetections = { objectDetections = it; cameraError = null },
-                onSceneAwareness = { sceneAwareness = it },
-                onStatus = { depthStatus = it },
+                onSceneAwareness = {
+                    sceneAwareness = it
+                    applyAvoidance(it)
+                },
+                onStatus = {
+                    depthStatus = it
+                    if (autonomousEnabled && (!it.sessionActive || !it.depthActive)) {
+                        applyAvoidance()
+                    }
+                },
                 onError = { cameraError = it },
-                modifier = Modifier.fillMaxWidth().weight(3f)
+                modifier = Modifier.fillMaxHeight().weight(3f)
             )
-        } else OcrCameraPreview(
-            frameResult = frameResult,
-            objectDetections = objectDetections,
-            onResult = {
-                frameResult = it
-                cameraError = null
-            },
-            onObjectDetections = {
-                objectDetections = it
-                cameraError = null
-            },
-            onError = { cameraError = it },
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(3f)
-        )
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.width(10.dp))
+        Column(
+            modifier = Modifier
+                .fillMaxHeight()
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+        ) {
 
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -227,11 +285,38 @@ private fun OcrCameraContent(
         )
         depthStatus.message?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
         SceneAwarenessPanel(sceneAwareness)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("AUTONOMOUS AVOIDANCE: ${if (autonomousEnabled) "ON" else "OFF"}")
+            Switch(
+                checked = autonomousEnabled,
+                onCheckedChange = { enabled ->
+                    autonomousEnabled = enabled
+                    onAutonomousAvoidanceEnabled(enabled)
+                    if (!enabled) {
+                        avoidanceDecision = AvoidanceDecision(AvoidanceState.IDLE, com.example.guidedogtest.WheelSpeeds(0, 0), "AUTO OFF")
+                        onAutonomousFrame(null)
+                    } else {
+                        applyAvoidance()
+                    }
+                }
+            )
+        }
+        Text("AUTO: ${if (autonomousEnabled) "ON" else "OFF"} • Action: ${avoidanceDecision.action}")
         Button(onClick = {
-            useDepthMode = !useDepthMode
-            sceneAwareness = null
+            autonomousEnabled = false
+            onAutonomousAvoidanceEnabled(false)
+            avoidanceDecision = AvoidanceDecision(
+                AvoidanceState.STOPPED,
+                com.example.guidedogtest.WheelSpeeds(0, 0),
+                "MANUAL STOP"
+            )
+            onAutonomousFrame(Drive.STOP_FRAME)
         }) {
-            Text(if (useDepthMode) "USE CAMERA-ONLY FALLBACK" else "USE ARCORE DEPTH")
+            Text("STOP")
         }
 
         Text(
@@ -263,13 +348,13 @@ private fun OcrCameraContent(
             },
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(2f)
-                .verticalScroll(rememberScrollState())
+                .height(96.dp)
                 .background(MaterialTheme.colorScheme.surfaceVariant)
                 .padding(12.dp),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodyLarge
         )
+        }
     }
 }
 
@@ -386,98 +471,6 @@ private fun SceneZoneOverlay(
 }
 
 @Composable
-private fun OcrCameraPreview(
-    frameResult: OcrFrameResult,
-    objectDetections: List<VisionObjectDetection>,
-    onResult: (OcrFrameResult) -> Unit,
-    onObjectDetections: (List<VisionObjectDetection>) -> Unit,
-    onError: (String) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val context = LocalContext.current
-    val lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current
-    val previewView = remember {
-        PreviewView(context).apply {
-            scaleType = PreviewView.ScaleType.FIT_CENTER
-            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-        }
-    }
-
-    DisposableEffect(lifecycleOwner, previewView) {
-        val disposed = AtomicBoolean(false)
-        val analysisExecutor = Executors.newSingleThreadExecutor()
-        val analyzer = OcrTextAnalyzer(
-            context = context,
-            onResult = { result ->
-                ContextCompat.getMainExecutor(context).execute {
-                    if (!disposed.get()) onResult(result)
-                }
-            },
-            onObjectDetections = { detections ->
-                ContextCompat.getMainExecutor(context).execute {
-                    if (!disposed.get()) onObjectDetections(detections)
-                }
-            },
-            onError = { error ->
-                ContextCompat.getMainExecutor(context).execute {
-                    if (!disposed.get()) onError(error)
-                }
-            }
-        )
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-        var cameraProvider: ProcessCameraProvider? = null
-        var imageAnalysis: ImageAnalysis? = null
-
-        cameraProviderFuture.addListener(
-            {
-                if (disposed.get()) return@addListener
-                try {
-                    cameraProvider = cameraProviderFuture.get()
-                    val preview = Preview.Builder().build().also {
-                        it.surfaceProvider = previewView.surfaceProvider
-                    }
-                    imageAnalysis = ImageAnalysis.Builder()
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .build()
-                        .also { analysis -> analysis.setAnalyzer(analysisExecutor, analyzer) }
-
-                    cameraProvider?.unbindAll()
-                    cameraProvider?.bindToLifecycle(
-                        lifecycleOwner,
-                        CameraSelector.DEFAULT_BACK_CAMERA,
-                        preview,
-                        imageAnalysis
-                    )
-                } catch (error: Exception) {
-                    onError(error.message ?: "Unable to start the rear camera.")
-                }
-            },
-            ContextCompat.getMainExecutor(context)
-        )
-
-        onDispose {
-            disposed.set(true)
-            imageAnalysis?.clearAnalyzer()
-            cameraProvider?.unbindAll()
-            analyzer.close()
-            analysisExecutor.shutdown()
-        }
-    }
-
-    Box(modifier = modifier.background(Color.Black)) {
-        AndroidView(
-            factory = { previewView },
-            modifier = Modifier.fillMaxSize()
-        )
-        VisionBoundingBoxOverlay(
-            frameResult = frameResult,
-            objectDetections = objectDetections,
-            modifier = Modifier.fillMaxSize()
-        )
-    }
-}
-
-@Composable
 private fun VisionBoundingBoxOverlay(
     frameResult: OcrFrameResult,
     objectDetections: List<VisionObjectDetection>,
@@ -489,22 +482,18 @@ private fun VisionBoundingBoxOverlay(
     val objectLabelText = MaterialTheme.colorScheme.onTertiaryContainer
     Canvas(modifier = modifier) {
         if (frameResult.imageWidth <= 0 || frameResult.imageHeight <= 0) return@Canvas
-        val scale = min(
-            size.width / frameResult.imageWidth,
-            size.height / frameResult.imageHeight
-        )
-        val horizontalOffset = (size.width - frameResult.imageWidth * scale) / 2f
-        val verticalOffset = (size.height - frameResult.imageHeight * scale) / 2f
+        val scaleX = size.width / frameResult.imageWidth
+        val scaleY = size.height / frameResult.imageHeight
 
         frameResult.blocks.forEach { block ->
             val bounds = block.boundingBox
             drawRect(
                 color = boxColor,
                 topLeft = Offset(
-                    horizontalOffset + bounds.left * scale,
-                    verticalOffset + bounds.top * scale
+                    bounds.left * scaleX,
+                    bounds.top * scaleY
                 ),
-                size = Size(bounds.width() * scale, bounds.height() * scale),
+                size = Size(bounds.width() * scaleX, bounds.height() * scaleY),
                 style = Stroke(width = 3.dp.toPx())
             )
         }
@@ -521,10 +510,10 @@ private fun VisionBoundingBoxOverlay(
 
         objectDetections.forEach { detection ->
             val bounds = detection.boundingBox
-            val left = horizontalOffset + bounds.left * scale
-            val top = verticalOffset + bounds.top * scale
-            val width = bounds.width() * scale
-            val height = bounds.height() * scale
+            val left = bounds.left * scaleX
+            val top = bounds.top * scaleY
+            val width = bounds.width() * scaleX
+            val height = bounds.height() * scaleY
             drawRect(
                 color = objectBoxColor,
                 topLeft = Offset(left, top),

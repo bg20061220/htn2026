@@ -111,6 +111,7 @@ fun NavigationScreen() {
 
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    val link = remember { RobotLink(context) }
 
     val fusedLocationClient =
         remember { LocationServices.getFusedLocationProviderClient(context) }
@@ -131,12 +132,11 @@ fun NavigationScreen() {
     var routeMessage by remember { mutableStateOf<String?>(null) }
     var routeLoading by remember { mutableStateOf(false) }
     var command by remember { mutableStateOf("STOP") }
-
     // Something the UI needs said but cannot speak where it decides it: the voice assistant's
     // onCommand lambda is constructed *by* the call that creates the manager, so it cannot call it.
     // Corrections are queued here and spoken by the effect that drains it.
     var pendingAnnouncement by remember { mutableStateOf<String?>(null) }
-    var showOcrMode by remember { mutableStateOf(false) }
+    var showCameraView by remember { mutableStateOf(false) }
 
     // Live position, so the follower never works from a stale fix.
     var lastLocation by remember { mutableStateOf<Location?>(null) }
@@ -164,6 +164,9 @@ fun NavigationScreen() {
 
     // When this is set it wins over the manual command: that is what makes the robot autonomous.
     var autonomousFrame by remember { mutableStateOf<String?>(null) }
+    var avoidanceActive by remember { mutableStateOf(false) }
+    var avoidanceFrame by remember { mutableStateOf(Drive.STOP_FRAME) }
+    var emergencyStopSignal by remember { mutableStateOf(0L) }
 
     val scope = rememberCoroutineScope()
 
@@ -189,9 +192,13 @@ fun NavigationScreen() {
      */
     fun halt(sayIt: Boolean = true) {
         stopFollowing()
+        avoidanceActive = false
+        avoidanceFrame = Drive.STOP_FRAME
         command = "STOP"
         autonomousFrame = Drive.STOP_FRAME
         routeStatus = "stopped"
+        emergencyStopSignal++
+        link.send(Drive.STOP_FRAME)
         if (sayIt) pendingAnnouncement = "Stopping."
     }
 
@@ -231,10 +238,6 @@ fun NavigationScreen() {
             micPermissionGranted = granted
         }
 
-    // The robot link is created before the voice assistant: its commands reach the motors through the
-    // same path as the manual buttons, so it has to exist first.
-    val link = remember { RobotLink(context) }
-
     val conversationManager: ConversationManager = viewModel(
         factory = viewModelFactory {
             initializer {
@@ -252,7 +255,7 @@ fun NavigationScreen() {
                         // they take the motors back from the follower and set the command the
                         // transmit loop sends. Nothing about voice reaches the car another way.
                         when (robotCommand) {
-                            RobotCommand.Stop -> halt()
+                            RobotCommand.Stop -> halt(sayIt = false)
 
                             RobotCommand.Go -> {
                                 // "Go" means start following the route that is already loaded - the
@@ -281,6 +284,7 @@ fun NavigationScreen() {
 
                             is RobotCommand.Turn -> {
                                 stopFollowing()
+                                avoidanceActive = false
                                 command = if (robotCommand.direction.lowercase().contains("left")) {
                                     "LEFT"
                                 } else {
@@ -305,7 +309,7 @@ fun NavigationScreen() {
                     // Heard by the always-listening loop, with no wake word and no round trip: the
                     // person saying "stop" means now, and this is the one path that fires while the
                     // robot is walking and nothing else is going on.
-                    onStopWord = { halt() }
+                    onStopWord = { halt(sayIt = false) }
                 )
             }
         }
@@ -542,7 +546,12 @@ fun NavigationScreen() {
 
         while (link.connected) {
 
-            link.send(autonomousFrame ?: motorSettings.speedsFor(command).frame())
+            val frame = when {
+                avoidanceActive -> avoidanceFrame
+                autonomousFrame != null -> autonomousFrame!!
+                else -> motorSettings.speedsFor(command).frame()
+            }
+            link.send(frame)
 
             if (tick % 4 == 0) {
                 link.send("h500\n")
@@ -690,6 +699,10 @@ fun NavigationScreen() {
             command = command,
             onCommand = {
                 stopFollowing()
+                if (it == "STOP") {
+                    avoidanceActive = false
+                    avoidanceFrame = Drive.STOP_FRAME
+                }
                 command = it
             },
             rawHeading = headingSource.rawHeadingDegrees,
@@ -826,8 +839,11 @@ fun NavigationScreen() {
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        Button(onClick = { showOcrMode = true }) {
-            Text("OPEN OCR CAMERA")
+        Button(
+            onClick = { showCameraView = true },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("CAMERA VIEW")
         }
 
         Spacer(modifier = Modifier.height(24.dp))
@@ -1159,6 +1175,7 @@ fun NavigationScreen() {
 
                 if (following) {
                     stopFollowing()
+                    avoidanceActive = false
                     command = "STOP"
                     routeStatus = "stopped"
                     return@Button
@@ -1176,6 +1193,7 @@ fun NavigationScreen() {
 
                 // Hand the motors over to the follower; the manual command goes neutral.
                 command = "STOP"
+                avoidanceActive = false
                 autonomousFrame = Drive.STOP_FRAME
                 following = true
             },
@@ -1200,14 +1218,36 @@ fun NavigationScreen() {
         }
     }
 
-    if (showOcrMode) {
+    fun closeCameraView() {
+        avoidanceActive = false
+        avoidanceFrame = Drive.STOP_FRAME
+        stopFollowing()
+        command = "STOP"
+        link.send(Drive.STOP_FRAME)
+        showCameraView = false
+    }
+
+    if (showCameraView) {
         Dialog(
-            onDismissRequest = { showOcrMode = false },
+            onDismissRequest = { closeCameraView() },
             properties = DialogProperties(usePlatformDefaultWidth = false)
         ) {
             OcrScreen(
-                onClose = { showOcrMode = false },
-                speakObstacleAlert = conversationManager::speakObstacleAlert
+                onClose = { closeCameraView() },
+                speakObstacleAlert = conversationManager::speakObstacleAlert,
+                robotConnected = link.connected,
+                emergencyStopSignal = emergencyStopSignal,
+                onAutonomousAvoidanceEnabled = { enabled ->
+                    avoidanceActive = enabled
+                    avoidanceFrame = Drive.STOP_FRAME
+                    if (enabled) {
+                        stopFollowing()
+                        command = "STOP"
+                    }
+                },
+                onAutonomousFrame = { frame ->
+                    avoidanceFrame = frame ?: Drive.STOP_FRAME
+                }
             )
         }
     }

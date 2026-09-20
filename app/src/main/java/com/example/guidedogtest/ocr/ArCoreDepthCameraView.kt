@@ -65,7 +65,7 @@ class ArCoreDepthCameraView(
             session.resume()
             resumed = true
             super.onResume()
-            onStatus(ArDepthStatus(true, depthSupported, message = if (depthSupported) null else "Depth API is not supported on this device."))
+            onStatus(ArDepthStatus(true, false, message = if (depthSupported) "Waiting for depth..." else "Depth API is not supported on this device."))
         } catch (error: CameraNotAvailableException) {
             onStatus(ArDepthStatus(message = "ARCore camera is unavailable: ${error.message}"))
         }
@@ -125,7 +125,8 @@ private class CameraRenderer(
             drawCamera(frame)
             if (frame.timestamp == 0L || frame.timestamp - lastAnalysisNanos < ANALYSIS_INTERVAL_NANOS) return
             val cameraImage = try { frame.acquireCameraImage() } catch (_: NotYetAvailableException) { return }
-            val copied = try { ArCoreVisionProcessor.copy(cameraImage) } finally { cameraImage.close() }
+            val viewCorners = imageToViewCorners(frame, cameraImage.width, cameraImage.height)
+            val copied = try { ArCoreVisionProcessor.copy(cameraImage, viewCorners) } finally { cameraImage.close() }
             val rotation = cameraRotationDegrees()
             val depth = acquireDepth(frame, copied.width, copied.height)
             lastAnalysisNanos = frame.timestamp
@@ -135,9 +136,29 @@ private class CameraRenderer(
         }
     }
 
+    private fun imageToViewCorners(frame: Frame, width: Int, height: Int): FloatArray {
+        val input = floatBuffer(floatArrayOf(0f, 0f, width.toFloat(), 0f, 0f, height.toFloat()))
+        val output = floatBuffer(FloatArray(6))
+        frame.transformCoordinates2d(
+            Coordinates2d.IMAGE_PIXELS,
+            input,
+            Coordinates2d.VIEW_NORMALIZED,
+            output
+        )
+        return FloatArray(6).also { output.rewind(); output.get(it) }
+    }
+
     private fun acquireDepth(frame: Frame, imageWidth: Int, imageHeight: Int): DepthFrame? {
-        if (!depthSupported) return null
-        val depthImage = try { frame.acquireDepthImage16Bits() } catch (_: NotYetAvailableException) { return null }
+        if (!depthSupported) {
+            onStatus(ArDepthStatus(true, false, message = "Depth API is not supported on this device."))
+            return null
+        }
+        val depthImage = try {
+            frame.acquireDepthImage16Bits()
+        } catch (_: NotYetAvailableException) {
+            onStatus(ArDepthStatus(true, false, latestDepthTimestamp, "Depth measurement temporarily unavailable."))
+            return null
+        }
         return try {
             val plane = depthImage.planes[0]
             val buffer = plane.buffer.order(ByteOrder.LITTLE_ENDIAN)

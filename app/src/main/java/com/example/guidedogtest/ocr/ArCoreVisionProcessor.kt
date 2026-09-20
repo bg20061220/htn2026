@@ -2,6 +2,8 @@ package com.example.guidedogtest.ocr
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.PointF
+import android.graphics.RectF
 import android.media.Image
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
@@ -17,7 +19,8 @@ data class CameraYuvFrame(
     val height: Int,
     val y: PlaneCopy,
     val u: PlaneCopy,
-    val v: PlaneCopy
+    val v: PlaneCopy,
+    val viewCorners: FloatArray
 )
 
 data class PlaneCopy(val bytes: ByteArray, val rowStride: Int, val pixelStride: Int)
@@ -40,18 +43,22 @@ class ArCoreVisionProcessor(
         if (!busy.compareAndSet(false, true)) return
         executor.execute {
             try {
-                depth?.let { sceneAwarenessAnalyzer.analyzeIfDue(it) }
-                    ?.let(onSceneAwareness)
+                if (depth == null) {
+                    onSceneAwareness(SceneAwarenessResult())
+                } else {
+                    sceneAwarenessAnalyzer.analyzeIfDue(depth)?.let(onSceneAwareness)
+                }
                 val bitmap = frame.toBitmap()
                 val uprightWidth = if (rotation == 90 || rotation == 270) frame.height else frame.width
                 val uprightHeight = if (rotation == 90 || rotation == 270) frame.width else frame.height
                 val detections = detector.detect(bitmap.copy(Bitmap.Config.ARGB_8888, false), rotation)
-                onObjects(
-                    DepthObjectFusion.attachDepth(
+                val fusedDetections = DepthObjectFusion.attachDepth(
                         detections, uprightWidth, uprightHeight,
                         frame.width, frame.height, rotation, depth
                     )
-                )
+                onObjects(fusedDetections.map {
+                    it.copy(boundingBox = frame.toViewRect(it.boundingBox, rotation))
+                })
 
                 val now = android.os.SystemClock.elapsedRealtime()
                 if (now - lastOcrMillis < OCR_INTERVAL_MILLIS) {
@@ -67,10 +74,16 @@ class ArCoreVisionProcessor(
                             OcrFrameResult(
                                 text.text,
                                 text.textBlocks.mapNotNull { block ->
-                                    block.boundingBox?.let { OcrTextBlock(block.text, android.graphics.Rect(it)) }
+                                    block.boundingBox?.let {
+                                        val view = frame.toViewRect(RectF(it), rotation)
+                                        OcrTextBlock(block.text, android.graphics.Rect(
+                                            view.left.toInt(), view.top.toInt(),
+                                            view.right.toInt(), view.bottom.toInt()
+                                        ))
+                                    }
                                 },
-                                uprightWidth,
-                                uprightHeight
+                                VIEW_COORDINATE_SIZE,
+                                VIEW_COORDINATE_SIZE
                             )
                         )
                     }
@@ -93,7 +106,7 @@ class ArCoreVisionProcessor(
     }
 
     companion object {
-        fun copy(image: Image): CameraYuvFrame {
+        fun copy(image: Image, viewCorners: FloatArray): CameraYuvFrame {
             fun plane(index: Int): PlaneCopy {
                 val source = image.planes[index]
                 val buffer = source.buffer
@@ -101,12 +114,41 @@ class ArCoreVisionProcessor(
                 buffer.get(bytes)
                 return PlaneCopy(bytes, source.rowStride, source.pixelStride)
             }
-            return CameraYuvFrame(image.width, image.height, plane(0), plane(1), plane(2))
+            return CameraYuvFrame(image.width, image.height, plane(0), plane(1), plane(2), viewCorners)
         }
 
         private const val OCR_INTERVAL_MILLIS = 800L
+        const val VIEW_COORDINATE_SIZE = 10_000
     }
 }
+
+private fun CameraYuvFrame.toViewRect(rect: RectF, rotation: Int): RectF {
+    val points = arrayOf(
+        PointF(rect.left, rect.top), PointF(rect.right, rect.top),
+        PointF(rect.left, rect.bottom), PointF(rect.right, rect.bottom)
+    ).map { uprightToRaw(it, width, height, rotation) }.map { raw ->
+        val nx = raw.x / width
+        val ny = raw.y / height
+        PointF(
+            viewCorners[0] + nx * (viewCorners[2] - viewCorners[0]) + ny * (viewCorners[4] - viewCorners[0]),
+            viewCorners[1] + nx * (viewCorners[3] - viewCorners[1]) + ny * (viewCorners[5] - viewCorners[1])
+        )
+    }
+    return RectF(
+        points.minOf { it.x } * ArCoreVisionProcessor.VIEW_COORDINATE_SIZE,
+        points.minOf { it.y } * ArCoreVisionProcessor.VIEW_COORDINATE_SIZE,
+        points.maxOf { it.x } * ArCoreVisionProcessor.VIEW_COORDINATE_SIZE,
+        points.maxOf { it.y } * ArCoreVisionProcessor.VIEW_COORDINATE_SIZE
+    )
+}
+
+private fun uprightToRaw(p: PointF, width: Int, height: Int, rotation: Int): PointF =
+    when ((rotation % 360 + 360) % 360) {
+        90 -> PointF(p.y, height - p.x)
+        180 -> PointF(width - p.x, height - p.y)
+        270 -> PointF(width - p.y, p.x)
+        else -> p
+    }
 
 private fun CameraYuvFrame.toBitmap(): Bitmap {
     val pixels = IntArray(width * height)

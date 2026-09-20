@@ -19,8 +19,13 @@ class SpeechCapture(private val context: Context) {
 
     private var recognizer: SpeechRecognizer? = null
 
-    fun startListening(onResult: (String) -> Unit, onError: () -> Unit) {
+    fun startListening(
+        onResult: (String) -> Unit,
+        onError: () -> Unit,
+        onEmergencyStop: () -> Unit,
+    ) {
         recognizer?.destroy()
+        var completed = false
         recognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
             setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) {
@@ -39,19 +44,36 @@ class SpeechCapture(private val context: Context) {
                     val partial = partialResults
                         ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     Log.d(TAG, "onPartialResults: $partial")
+                    if (!completed && partial?.any(EmergencyStopMatcher::matches) == true) {
+                        completed = true
+                        stopListening()
+                        onEmergencyStop()
+                    }
                 }
 
                 override fun onError(error: Int) {
+                    if (completed) return
+                    completed = true
                     Log.d(TAG, "onError: $error (${errorName(error)})")
                     onError()
                 }
 
                 override fun onResults(results: Bundle?) {
+                    if (completed) return
                     val text = results
                         ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                         ?.firstOrNull()
                     Log.d(TAG, "onResults: $text")
-                    if (text.isNullOrBlank()) onError() else onResult(text)
+                    if (text.isNullOrBlank()) {
+                        completed = true
+                        onError()
+                    } else if (EmergencyStopMatcher.matches(text)) {
+                        completed = true
+                        onEmergencyStop()
+                    } else {
+                        completed = true
+                        onResult(text)
+                    }
                 }
             })
             startListening(

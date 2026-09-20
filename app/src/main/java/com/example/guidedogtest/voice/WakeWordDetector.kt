@@ -55,7 +55,11 @@ class WakeWordDetector(
         }
 
         override fun onResults(results: Bundle?) {
-            if (heardStopWord(results)) return
+            if (heardEmergencyStop(results)) {
+                consecutiveErrors = 0
+                restartWithBackoff()
+                return
+            }
             if (containsWakeWord(transcriptOf(results))) {
                 fireWakeWord()
             } else {
@@ -65,7 +69,7 @@ class WakeWordDetector(
         }
 
         override fun onPartialResults(partialResults: Bundle?) {
-            if (heardStopWord(partialResults)) return
+            if (heardEmergencyStop(partialResults)) return
             if (containsWakeWord(transcriptOf(partialResults))) {
                 fireWakeWord()
             }
@@ -80,10 +84,12 @@ class WakeWordDetector(
      *
      * It does not stop listening: the loop has to keep running so the next thing said is heard too.
      */
-    private fun heardStopWord(bundle: Bundle?): Boolean {
-        if (stopSent || !containsStopWord(transcriptOf(bundle))) return false
+    private fun heardEmergencyStop(bundle: Bundle?): Boolean {
+        val matches = bundle?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+        if (stopSent) return true
+        if (matches?.any(EmergencyStopMatcher::matches) != true) return false
         stopSent = true
-        Log.d(TAG, "stop word heard")
+        Log.d(TAG, "emergency stop phrase heard")
         onStopWordDetected()
         return true
     }
