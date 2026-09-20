@@ -39,7 +39,6 @@ import com.example.guidedogtest.ocr.OcrScreen
 import com.example.guidedogtest.ocr.DesiredTravelDirection
 import com.example.guidedogtest.ocr.AvoidanceDecision
 import com.example.guidedogtest.ocr.AvoidanceState
-import com.example.guidedogtest.ocr.AvoidanceStop
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
@@ -67,7 +66,6 @@ import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.ar.core.Session
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -142,9 +140,6 @@ fun NavigationScreen() {
     var routeMessage by remember { mutableStateOf<String?>(null) }
     var routeLoading by remember { mutableStateOf(false) }
     var command by remember { mutableStateOf("STOP") }
-    // The spoken turn that is currently running, so a second one replaces it rather than stacking.
-    var turnIntentJob by remember { mutableStateOf<Job?>(null) }
-
     // Something the UI needs said but cannot speak where it decides it: the voice assistant's
     // onCommand lambda is constructed *by* the call that creates the manager, so it cannot call it.
     // Corrections are queued here and spoken by the effect that drains it.
@@ -199,6 +194,9 @@ fun NavigationScreen() {
     // without either of them knowing.
     var routeSpeeds by remember { mutableStateOf<WheelSpeeds?>(null) }
     var avoidanceActive by remember { mutableStateOf(false) }
+    // Every fresh drive command bumps this: the camera view reads it as "the walker has answered the
+    // stop, judge the next frames afresh".
+    var driveCommandSeq by remember { mutableStateOf(0) }
     var avoidanceDecision by remember {
         mutableStateOf(AvoidanceDecision(AvoidanceState.IDLE, WheelSpeeds(0, 0), "AUTO OFF"))
     }
@@ -257,7 +255,7 @@ fun NavigationScreen() {
      * from one place and be forgotten in another.
      */
     fun halt(sayIt: Boolean = true) {
-        turnIntentJob?.cancel()
+        driveCommandSeq++
         stopFollowing()
         avoidanceActive = false
         avoidanceDecision = AvoidanceDecision(AvoidanceState.IDLE, WheelSpeeds(0, 0), "AUTO OFF")
@@ -268,10 +266,30 @@ fun NavigationScreen() {
         if (sayIt) pendingAnnouncement = "Stopping."
     }
 
+    /**
+     * Arm a forward walk: watch the path with the depth layer, and drive.
+     *
+     * Both halves matter. Arming the layer is what makes it able to stop the car; the command is what
+     * makes the car move when the layer has nothing to say - a controller that is switched off, or
+     * still waking up, must not be the reason a spoken "go forward" produces a spoken acknowledgement
+     * and no wheels. A fresh command is also the answer to a latched obstacle stop, which is why this
+     * is the one path every forward command goes through.
+     */
+    fun goForward() {
+        stopFollowing()
+        routeSpeeds = null
+        desiredRouteDirection = DesiredTravelDirection.FORWARD
+        avoidanceActive = true
+        command = "FORWARD"
+        showCameraView = true
+        driveCommandSeq++
+    }
+
     fun manualDrive(next: String) {
         stopFollowing()
         avoidanceActive = false
         command = next
+        driveCommandSeq++
     }
 
     /**
@@ -366,49 +384,18 @@ fun NavigationScreen() {
                             // person saying it cannot see the car, so the same obstacle sensing that
                             // guards a route has to guard a spoken turn. The page's buttons stay the
                             // unguarded bench path.
+                            // Straight to the tuned wheel pair, with no camera and no depth in the
+                            // loop - the same path the pages' own buttons take, which is the one the
+                            // bench has proven. Obstacle avoidance needs the depth module warmed up
+                            // (depth-from-motion) and is not reliable enough yet to stand between the
+                            // walker and "go forward"; it runs from the camera view's AUTO switch
+                            // instead, where it can be shown on its own.
                             is RobotCommand.Turn -> {
                                 val left = robotCommand.direction.lowercase().contains("left")
-                                stopFollowing()
-                                command = "STOP"
-                                routeSpeeds = null
-                                desiredRouteDirection = if (left) {
-                                    DesiredTravelDirection.PIVOT_LEFT
-                                } else {
-                                    DesiredTravelDirection.PIVOT_RIGHT
-                                }
-                                avoidanceActive = true
-                                showCameraView = true
-                                Log.d(
-                                    TAG_MAIN,
-                                    "Voice turn ${robotCommand.direction} -> depth pivot for " +
-                                        "${VOICE_TURN_MS} ms",
-                                )
-                                // A turn is a moment, not a mode. This request used to be the last
-                                // word forever: the intent sat in `desiredRouteDirection`, and a clear
-                                // middle never got to drive again because a pivot was still being
-                                // asked for. It now expires, and the boxes take it from there.
-                                turnIntentJob?.cancel()
-                                turnIntentJob = coroutineScope.launch {
-                                    delay(VOICE_TURN_MS)
-                                    if (desiredRouteDirection == DesiredTravelDirection.PIVOT_LEFT ||
-                                        desiredRouteDirection == DesiredTravelDirection.PIVOT_RIGHT
-                                    ) {
-                                        desiredRouteDirection = DesiredTravelDirection.FORWARD
-                                        Log.d(TAG_MAIN, "Voice turn finished -> forward")
-                                    }
-                                }
+                                manualDrive(if (left) "LEFT" else "RIGHT")
                             }
 
-                            // Straight ahead, with the depth layer watching: no destination needed,
-                            // so this is the one that works with no route loaded.
-                            RobotCommand.Forward -> {
-                                stopFollowing()
-                                command = "STOP"
-                                routeSpeeds = null
-                                desiredRouteDirection = DesiredTravelDirection.FORWARD
-                                avoidanceActive = true
-                                showCameraView = true
-                            }
+                            RobotCommand.Forward -> goForward()
 
                             // The depth camera only measures the forward corridor, so a reverse
                             // command cannot be checked against anything. Refusing it and saying so
@@ -835,26 +822,10 @@ fun NavigationScreen() {
      * True while a walk is under way with nothing able to see the path: the firmware's sonar is
      * switched off and no ToF is fitted, so the ARCore depth feed is the robot's only obstacle sense.
      */
-    val obstacleSensingLost = avoidanceActive &&
-        avoidanceDecision.stopReason == AvoidanceStop.SENSING_UNAVAILABLE
-
-    // Losing the only sense the robot has is not something to discover on a leash. It is said out
-    // loud once per walk - after a grace period, because the camera session needs a moment to prove
-    // itself - and it stays on the screen for whoever is walking beside the robot.
-    var noSensingWarned by remember { mutableStateOf(false) }
-    LaunchedEffect(obstacleSensingLost) {
-        if (!obstacleSensingLost) {
-            noSensingWarned = false
-            return@LaunchedEffect
-        }
-        delay(NO_OBSTACLE_SENSING_GRACE_MS)
-        if (!noSensingWarned) {
-            noSensingWarned = true
-            conversationManager.announce(
-                "I can't see what's ahead, so I've stopped until the camera comes back."
-            )
-        }
-    }
+    // Shown on screen, not spoken: driving on the command alone is a normal state now (the boxes load
+    // as the robot moves), so it is a status line for the bench rather than something to interrupt a
+    // walk with.
+    val obstacleSensingLost = avoidanceActive && !avoidanceDecision.obstacleSensingAvailable
 
     // Leaving the screen must never leave the car rolling.
     DisposableEffect(Unit) {
@@ -1291,8 +1262,8 @@ fun NavigationScreen() {
 
         if (obstacleSensingLost) {
             Text(
-                text = "Obstacle detection is OFF - nothing is seeing the path, so the robot is " +
-                    "standing still. Turn the camera view on or drive it manually.",
+                text = "Obstacle detection is OFF - nothing is seeing the path yet, so the robot is " +
+                    "driving on the command alone. It takes over as soon as the boxes load.",
                 color = MaterialTheme.colorScheme.error,
             )
         }
@@ -1392,6 +1363,7 @@ fun NavigationScreen() {
                 routeNavigationActive = following,
                 desiredRouteDirection = desiredRouteDirection,
                 emergencyStopSignal = emergencyStopSignal,
+                driveCommandSeq = driveCommandSeq,
                 onAutonomousAvoidanceEnabled = { enabled ->
                     avoidanceActive = enabled
                     if (enabled) {
@@ -1407,6 +1379,7 @@ fun NavigationScreen() {
                         }
                     }
                 },
+                onGoForward = { goForward() },
                 onAvoidanceDecision = { avoidanceDecision = it },
                 onSceneSnapshot = { sensorSnapshot = it },
             )
@@ -1465,20 +1438,11 @@ private fun RobotMapPane(
 private const val FOLLOW_TICK_MS = 100L
 private const val ROUTE_DIRECTION_ERROR_DEGREES = 5.0
 
-/** How long the depth feed has to prove itself before its absence is spoken about. */
-private const val NO_OBSTACLE_SENSING_GRACE_MS = 2_500L
-
 /**
  * How often the frame and heartbeat are re-sent when nothing has changed: 5 Hz, well inside the
  * firmware's 500 ms cutoff. A *change* is sent immediately, so this is only the keep-alive.
  */
 private const val HEARTBEAT_MS = 200L
-
-/**
- * How long a spoken "turn left/right" pivots for before the robot goes back to driving on what the
- * boxes say. A quarter turn at the tuned pivot pair; say it again to turn further.
- */
-private const val VOICE_TURN_MS = 1_200L
 
 /** What the firmware reads as "the phone is still here": 500 ms of silence stops the motors. */
 private const val HEARTBEAT_FRAME = "h500\n"

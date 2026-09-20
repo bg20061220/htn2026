@@ -22,18 +22,17 @@ object MotorTuning {
     const val MANUAL_TURN_INNER_RIGHT = 195
 
     /**
-     * How much of the tuned turn pair an **automatic** pivot uses. 1.0 would be exactly the numbers on
-     * the Configure Robot page.
+     * How much of the tuned turn pair an **automatic** pivot uses. Leave this at 1.0.
      *
-     * This is the one knob for "the turns are too aggressive": it scales the obstacle pivot, the
-     * route's turn, a spoken "turn left/right" and the warm-up swivel together, so they stay in
-     * proportion instead of one of them being tuned at a time.
+     * 0.6 was tried, to soften the turns, and the robot stopped rotating at all: the motor floor
+     * (110) is the power that turns a *free* wheel, and swinging the whole chassis - casters, weight,
+     * friction - needs the pair that was calibrated for it. "Too aggressive" is about how a turn
+     * *starts*, not how strong it is, which is what [PIVOT_RAMP_MS] and [PIVOT_RAMP_START] are for.
      *
-     * Do not go below about 0.55 without knowing why: the pair is floored at the motor minimum, so
-     * past that point both wheels sit at 110, the pivot loses the asymmetry this chassis needs to
-     * rotate on the spot rather than curve, and the easing ramp stops showing at all.
+     * If the floor test says the robot over-turns, retune the pair on the Configure Robot page - that
+     * is what it is for.
      */
-    const val PIVOT_FRACTION = 0.6f
+    const val PIVOT_FRACTION = 1.0f
 
     /** The tuned pair for one direction, at [PIVOT_FRACTION], floored so the wheels still turn. */
     fun pivotPair(turn: WheelSpeeds): WheelSpeeds = WheelSpeeds(

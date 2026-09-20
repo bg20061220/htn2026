@@ -1,0 +1,211 @@
+COMMANDS (from the repository root):
+  python review/harness/badge_check.py
+  .tools\arduino.cmd compile --fqbn "esp32:esp32:esp32c3:CDCOnBoot=cdc,FlashMode=dio,FlashFreq=80,FlashSize=4M,PartitionScheme=no_ota" remote/badge_controller
+  .tools\arduino.cmd compile --fqbn "esp32:esp32:esp32s3:PartitionScheme=huge_app" OpenBot/firmware/openbot
+  .tools\arduino.cmd compile --build-property "compiler.cpp.extra_flags=-DHAS_ESPNOW=0" --fqbn "esp32:esp32:esp32s3:PartitionScheme=huge_app" OpenBot/firmware/openbot
+CAPTURED: 2026-09-20T06:55:55-04:00
+
+----------------------------------------------------------------------------------------------------
+BADGE CONTROLLER -> CAR, WITHOUT HARDWARE
+There is no badge on this machine's USB and the car is at the venue, so nothing here was flashed
+or run. What can be checked off-hardware is checked: both firmwares build with the repository's own
+toolchain, and the bytes the two sides will exchange are compared field by field.
+----------------------------------------------------------------------------------------------------
+
+====================================================================================================
+1. PROTOCOL AGREEMENT — one wire format, two firmwares
+====================================================================================================
+  [ok ] every protocol constant matches between the badge and the car
+        ESPNOW_MAGIC_0 = 'B' (badge) / 'B' (car)
+        ESPNOW_MAGIC_1 = 'C' (badge) / 'C' (car)
+        ESPNOW_VERSION = 1 (badge) / 1 (car)
+        ESPNOW_KIND_DRIVE = 1 (badge) / 1 (car)
+        ESPNOW_KIND_STATUS = 2 (badge) / 2 (car)
+        ESPNOW_CHANNEL = 1 (badge) / 1 (car)
+        ESPNOW_PAIR_KEY = 0x5A17BAD6u (badge) / 0x5A17BAD6u (car)
+        ESPNOW_FLAG_STOP = 0x01 (badge) / 0x01 (car)
+        ESPNOW_STATUS_ESPNOW_DRIVING = 0x01 (badge) / 0x01 (car)
+        ESPNOW_STATUS_DEADMAN = 0x02 (badge) / 0x02 (car)
+        ESPNOW_STATUS_INTERVAL_MS = 500 (badge) / 500 (car)
+        ESPNOW_DRIVE_BYTES = 16 (badge) / 16 (car)
+        ESPNOW_STATUS_BYTES = 18 (badge) / 18 (car)
+  [ok ] both structs are the same fields, in the same order, with the same types
+        differs: []
+
+  BadgeCarStatus — 18 bytes on the air:
+      +  0  uint8_t        magic[2]
+      +  2  uint8_t        version
+      +  3  uint8_t        kind
+      +  4  uint32_t       pairKey
+      +  8  uint16_t       seq
+      + 10  uint16_t       uptime100ms
+      + 12  int16_t        left
+      + 14  int16_t        right
+      + 16  uint8_t        flags
+      + 17  uint8_t        reserved
+
+  BadgeDrivePacket — 16 bytes on the air:
+      +  0  uint8_t        magic[2]
+      +  2  uint8_t        version
+      +  3  uint8_t        kind
+      +  4  uint32_t       pairKey
+      +  8  int16_t        left
+      + 10  int16_t        right
+      + 12  uint16_t       seq
+      + 14  uint8_t        flags
+      + 15  uint8_t        reserved
+
+====================================================================================================
+2. THE SCREEN'S OWN TEXT — badge_font.h rendered back from its own bytes
+====================================================================================================
+  [ok ] the font table is complete and every glyph fits its cell
+        64 glyphs, 0x20..0x5F, stride 9 columns x 8 rows
+        advances 2..10 px
+
+  'PAIRED' as the panel will draw it:
+      ####....##...#.####..#####.####...
+      #...#...###..#.#...#.#.....#...#..
+      #...#...#.#..#.#...#.#.....#....#.
+      #...#...#.#..#.#...#.#.....#....#.
+      ####...####..#.####..####..#....#.
+      #......#...#.#.#..##.#.....#....#.
+      #......#...#.#.#...#.#.....#...#..
+      #.....#....#.#.#...#.#####.####...
+
+  'FWD 180,128' as the panel will draw it:
+      #####.#...##...####........##..###...###......##..###...###..
+      #.....##..##...#...#......###.#...#.##.##....###..#..#.#...#.
+      #......#..##...#....#.......#.#...#.#...#......#.....#.#...#.
+      #......#.#.#...#....#.......#..###..#...#......#.....#..###..
+      ####...#.#.###.#....#.......#.#...#.#...#......#....#..#...#.
+      #......#.#..##.#....#.......#.#...#.#...#......#...#...#...#.
+      #.......##..##.#...#........#.#...#.##.##......#..#....#...#.
+      #.......#...##.####.........#..###...###...#...#.#####..###..
+
+  'SEARCH' as the panel will draw it:
+      .###..#####...##...####...####..#....#.
+      #...#.#.......###..#...#..#...#.#....#.
+      #.....#.......#.#..#...#.#....#.#....#.
+      .##...#.......#.#..#...#.#......#....#.
+      ..###.####...####..####..#......######.
+      ....#.#......#...#.#..##.#....#.#....#.
+      #...#.#......#...#.#...#..#...#.#....#.
+      .###..#####.#....#.#...#..####..#....#.
+
+  'E-STOP  LEFT -205,190' as the panel will draw it:
+      #####.....###..#####..####...####..........#.....#####.#####.#####.........###...###...####.....##..###...###..
+      #........#...#...#....#...#..#...#.........#.....#.....#.......#...........#..#.##.##..#.......###.#...#.##.##.
+      #........#.......#...#.....#.#...#.........#.....#.....#.......#..............#.#...#.#..........#.#...#.#...#.
+      #.........##.....#...#.....#.#...#.........#.....#.....#.......#..............#.#...#.####.......#.#...#.#...#.
+      ####..##...###...#...#.....#.####..........#.....####..####....#.......##....#..#...#.##..#......#..####.#...#.
+      #............#...#...#.....#.#.............#.....#.....#.......#............#...#...#.....#......#.#...#.#...#.
+      #........#...#...#....#...#..#.............#.....#.....#.......#...........#....##.##.#...#......#.#..##.##.##.
+      #####.....###....#....####...#.............#####.#####.#.......#..........#####..###...###...#...#..###...###..
+  [ok ] every character the badge's own text contains has a glyph
+        65 distinct characters across the sketch's string literals, e.g.  '(),-./0248:=>?ABCDEFGHIJLMNOPRSTWXY[\]_abcdefghijklmnopqrs
+        nothing is missing
+
+====================================================================================================
+3. THE BUTTONS — shift order, polarity, and the pairs the car is tuned for
+====================================================================================================
+  [ok ] the shift order is the guide's A, B, Home, Down, Left, Right, Up, Aux1, active-low
+        bits: a=7, b=6, home=5, down=4, left=3, right=2, up=1, aux1=0
+        a sampled 0 is pressed, which is the active-low comparison in that line
+        Start: b.start = digitalRead(PIN_BTN_START) == LOW;
+
+  what the four buttons do (badge_controller.ino padManeuver, first match wins):
+      START  -> EmergencyStop
+      DOWN   -> Stop
+      UP     -> Forward
+      LEFT   -> Left
+      RIGHT  -> Right
+  [ok ] the four drive buttons are forward, left, right and stop, and a stop wins
+        precedence: EmergencyStop > Stop > Forward > Left > Right
+        start and down both stop; a held direction cannot outvote either
+  [ok ] the badge's drive pairs are the phone app's tuned pairs, not new numbers
+        DRIVE_FORWARD_LEFT: badge 180 / app 180
+        DRIVE_FORWARD_RIGHT: badge 128 / app 128
+        DRIVE_LEFT_LEFT: badge -205 / app -205
+        DRIVE_LEFT_RIGHT: badge 190 / app 190
+        DRIVE_RIGHT_LEFT: badge 205 / app 205
+        DRIVE_RIGHT_RIGHT: badge -195 / app -195
+  [ok ] the guide's pins are the ones this firmware uses
+        badge_pins.h is a transcription of the guide's section 2 table
+
+====================================================================================================
+4. PAIRING AND THE DEADMAN — who may talk, and what happens when nobody does
+====================================================================================================
+  [ok ] an ESP-NOW command lands on the same ctrl_left/ctrl_right and heartbeat_time the phone uses
+        ctrl_left = constrain(left, -255, 255);
+        ctrl_right = constrain(right, -255, 255);
+        heartbeat_time = millis();
+  [ok ] a learned MAC is registered as a peer before anything is unicast to it
+        badge side, learning the car: addPeer(gCarMac);
+        car side, learning the badge: espnow_add_peer(espnow_badge_mac);
+        ESP-NOW refuses esp_now_send() to an address that is not in the peer table, so a missing
+        registration is a link that dies at the moment it pairs - and it compiles perfectly.
+  [ok ] the phone's cutoff is still the only stop rule, and it is untouched
+        the 750 ms cutoff zeroes ctrl_left/ctrl_right whichever controller last spoke
+        a badge that goes quiet for 750 ms therefore stops the car by itself
+
+====================================================================================================
+The badge and the car agree on the wire, and the badge can draw what it says.
+
+----------------------------------------------------------------------------------------------------
+BUILDS
+----------------------------------------------------------------------------------------------------
+
+badge, esp32c3 -> exit 0
+  .tools\arduino.cmd compile --fqbn "esp32:esp32:esp32c3:CDCOnBoot=cdc,FlashMode=dio,FlashFreq=80,FlashSize=4M,PartitionScheme=no_ota" remote/badge_controller
+  Sketch uses 725104 bytes (34%) of program storage space. Maximum is 2097152 bytes.
+  Global variables use 40132 bytes (12%) of dynamic memory, leaving 287548 bytes for local variables. Maximum is 327680 bytes.
+
+car, esp32s3, badge link (HAS_ESPNOW=1) -> exit 0
+  .tools\arduino.cmd compile --fqbn "esp32:esp32:esp32s3:PartitionScheme=huge_app" OpenBot/firmware/openbot
+  Sketch uses 1284541 bytes (40%) of program storage space. Maximum is 3145728 bytes.
+  Global variables use 64580 bytes (19%) of dynamic memory, leaving 263100 bytes for local variables. Maximum is 327680 bytes.
+
+car, esp32s3, phone only (HAS_ESPNOW=0) -> exit 0
+  .tools\arduino.cmd compile --build-property "compiler.cpp.extra_flags=-DHAS_ESPNOW=0" --fqbn "esp32:esp32:esp32s3:PartitionScheme=huge_app" OpenBot/firmware/openbot
+  Sketch uses 1036273 bytes (32%) of program storage space. Maximum is 3145728 bytes.
+  Global variables use 55564 bytes (16%) of dynamic memory, leaving 272116 bytes for local variables. Maximum is 327680 bytes.
+
+----------------------------------------------------------------------------------------------------
+FLASH (transcribed from the upload run; the tool output is not re-capturable now that the board is gone)
+----------------------------------------------------------------------------------------------------
+
+  .tools\arduino.cmd upload -p COM8 --fqbn "esp32:esp32:esp32c3:CDCOnBoot=cdc,FlashMode=dio,FlashFreq=80,FlashSize=4M,PartitionScheme=no_ota" remote/badge_controller
+
+  Writing at 0x000c1939... (100 %)
+  Wrote 742496 bytes (451632 compressed) at 0x00010000 in 2.5 seconds (effective 2398.1 kbit/s)...
+  Hash of data verified.
+  Leaving...
+  Hard resetting via RTS pin...
+  New upload port: COM8 (serial)
+
+What that proves: the ESP32-C3 ROM bootloader accepted the image, wrote it at 0x10000 and verified the
+hash, with no manual download-mode hold (the guide's warning covers boards that need it; this one
+resets over USB-Serial-JTAG). The app is 742,496 bytes, inside the 2 MB no_ota app partition.
+
+FLASH TIME: 2026-09-20T07:04:16-04:00
+
+AFTER THE FLASH
+The board stopped enumerating before a monitor could attach, so nothing was read back:
+
+  $ .tools\arduino15\packages\esp32\tools\esptool_py\4.5.1\esptool.exe --port COM8 chip_id
+  A fatal error occurred: Could not open COM8, the port doesn't exist
+
+  $ powershell -NoProfile -Command "Get-PnpDevice -PresentOnly | ? { $_.InstanceId -like '*VID_303A*' }"
+  (no Espressif device present; COM8 is a stale registry entry - getportnames() still lists it)
+
+So: flashed and verified, then unplugged (or its USB dropped). The sketch's own output - the SC7A20
+probe, the ESP-NOW init line, the [cmd]/[inject] lines - has never been read, and neither the panel
+nor the LEDs have been looked at. A serial monitor is left retrying on COM8, so plugging the badge
+back in should attach and capture it.
+
+----------------------------------------------------------------------------------------------------
+WHAT IS NOT PROVEN HERE
+The panel's orientation and colour order, the WS2812 timing on the badge's own strip, the SC7A20
+probe and BLE+Wi-Fi coexistence on the car have never run on hardware. The first two are the
+PANEL_* switches in badge_pins.h (guide section 4); the last is -DHAS_ESPNOW=0.
+----------------------------------------------------------------------------------------------------

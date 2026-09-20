@@ -8,33 +8,33 @@ model 'command' value -> RobotCommand (GroqClient.kt:119-127) -> what MainActivi
 
 exact JSON, turn_left                                -> command=Turn(direction=left)         frame=c0,0         acted on: command="STOP"; desired=PIVOT_LEFT
 exact JSON, turn_right                               -> command=Turn(direction=right)        frame=c0,0         acted on: command="STOP"; desired=PIVOT_RIGHT; avoidanceActive=true (depth layer pivots)
-fenced in ```json                                    -> command=com.example.guidedogtest.voice.RobotCommand$None@b83a9be frame=c0,0         safe fallback
-leading prose then JSON                              -> command=com.example.guidedogtest.voice.RobotCommand$None@b83a9be frame=c0,0         safe fallback
-missing command key                                  -> command=com.example.guidedogtest.voice.RobotCommand$None@b83a9be frame=c0,0         silent no-op
-unknown command 'Turn'                               -> command=com.example.guidedogtest.voice.RobotCommand$None@b83a9be frame=c0,0         silent no-op
-unknown command 'TURN_LEFT'                          -> command=com.example.guidedogtest.voice.RobotCommand$None@b83a9be frame=c0,0         silent no-op
+fenced in ```json                                    -> command=com.example.guidedogtest.voice.RobotCommand$None@5c669da8 frame=c0,0         safe fallback
+leading prose then JSON                              -> command=com.example.guidedogtest.voice.RobotCommand$None@5c669da8 frame=c0,0         safe fallback
+missing command key                                  -> command=com.example.guidedogtest.voice.RobotCommand$None@5c669da8 frame=c0,0         silent no-op
+unknown command 'Turn'                               -> command=com.example.guidedogtest.voice.RobotCommand$None@5c669da8 frame=c0,0         silent no-op
+unknown command 'TURN_LEFT'                          -> command=com.example.guidedogtest.voice.RobotCommand$None@5c669da8 frame=c0,0         silent no-op
 navigate without destination                         -> command=Navigate(destination=)       frame=c0,0         acted on: no-op here; the route arrives via voiceRoute -> adoptRoute()
 navigate with destination                            -> command=Navigate(destination=the library) frame=c0,0         acted on: no-op here; the route arrives via voiceRoute -> adoptRoute()
-command from the system prompt vocabulary 'go'       -> command=com.example.guidedogtest.voice.RobotCommand$Go@1fd14d74 frame=c0,0         acted on: following=true + avoidanceActive=true (needs follower != null and a link)
-backward (understood so it can be refused)           -> command=com.example.guidedogtest.voice.RobotCommand$Backward@563e4951 frame=c0,0         acted on: halt() + spoken refusal: only the forward corridor is measured
-empty body                                           -> command=com.example.guidedogtest.voice.RobotCommand$None@b83a9be frame=c0,0         safe fallback
-error body (HTML)                                    -> command=com.example.guidedogtest.voice.RobotCommand$None@b83a9be frame=c0,0         safe fallback
-truncated JSON                                       -> command=com.example.guidedogtest.voice.RobotCommand$None@b83a9be frame=c0,0         safe fallback
-null JSON literal                                    -> command=com.example.guidedogtest.voice.RobotCommand$None@b83a9be frame=c0,0         safe fallback
+command from the system prompt vocabulary 'go'       -> command=com.example.guidedogtest.voice.RobotCommand$Go@1d483de4 frame=c0,0         acted on: following=true + avoidanceActive=true (needs follower != null and a link)
+backward (understood so it can be refused)           -> command=com.example.guidedogtest.voice.RobotCommand$Backward@4032d386 frame=c0,0         acted on: halt() + spoken refusal: only the forward corridor is measured
+empty body                                           -> command=com.example.guidedogtest.voice.RobotCommand$None@5c669da8 frame=c0,0         safe fallback
+error body (HTML)                                    -> command=com.example.guidedogtest.voice.RobotCommand$None@5c669da8 frame=c0,0         safe fallback
+truncated JSON                                       -> command=com.example.guidedogtest.voice.RobotCommand$None@5c669da8 frame=c0,0         safe fallback
+null JSON literal                                    -> command=com.example.guidedogtest.voice.RobotCommand$None@5c669da8 frame=c0,0         safe fallback
 
 ====================================================================================================
 ASSERTIONS
 ====================================================================================================
   CHECK PASS: turn_left maps to Turn("left")   (got Turn(direction=left), expected Turn(direction=left))
-  CHECK PASS: backward maps to Backward (the app then refuses it: no rear depth)   (got com.example.guidedogtest.voice.RobotCommand$Backward@563e4951, expected com.example.guidedogtest.voice.RobotCommand$Backward@563e4951)
+  CHECK PASS: backward maps to Backward (the app then refuses it: no rear depth)   (got com.example.guidedogtest.voice.RobotCommand$Backward@4032d386, expected com.example.guidedogtest.voice.RobotCommand$Backward@4032d386)
   CHECK PASS: turn_right maps to Turn("right")   (got Turn(direction=right), expected Turn(direction=right))
-  CHECK PASS: the fenced form does NOT parse - it is inert (falls back to None)   (got com.example.guidedogtest.voice.RobotCommand$None@b83a9be, expected com.example.guidedogtest.voice.RobotCommand$None@b83a9be)
-  CHECK PASS: leading prose breaks the parse (fallback)   (got com.example.guidedogtest.voice.RobotCommand$None@b83a9be, expected com.example.guidedogtest.voice.RobotCommand$None@b83a9be)
-  CHECK PASS: a missing command key is None, not Stop   (got com.example.guidedogtest.voice.RobotCommand$None@b83a9be, expected com.example.guidedogtest.voice.RobotCommand$None@b83a9be)
-  CHECK PASS: an unknown command is None, not Stop   (got com.example.guidedogtest.voice.RobotCommand$None@b83a9be, expected com.example.guidedogtest.voice.RobotCommand$None@b83a9be)
+  CHECK PASS: the fenced form does NOT parse - it is inert (falls back to None)   (got com.example.guidedogtest.voice.RobotCommand$None@5c669da8, expected com.example.guidedogtest.voice.RobotCommand$None@5c669da8)
+  CHECK PASS: leading prose breaks the parse (fallback)   (got com.example.guidedogtest.voice.RobotCommand$None@5c669da8, expected com.example.guidedogtest.voice.RobotCommand$None@5c669da8)
+  CHECK PASS: a missing command key is None, not Stop   (got com.example.guidedogtest.voice.RobotCommand$None@5c669da8, expected com.example.guidedogtest.voice.RobotCommand$None@5c669da8)
+  CHECK PASS: an unknown command is None, not Stop   (got com.example.guidedogtest.voice.RobotCommand$None@5c669da8, expected com.example.guidedogtest.voice.RobotCommand$None@5c669da8)
   CHECK PASS: navigate without a destination still becomes Navigate("")   (got Navigate(destination=), expected Navigate(destination=))
   CHECK PASS: an empty body is the fallback   (got Sorry, I didn't catch that., expected Sorry, I didn't catch that.)
-  CHECK PASS: an HTML error body is the fallback   (got com.example.guidedogtest.voice.RobotCommand$None@b83a9be, expected com.example.guidedogtest.voice.RobotCommand$None@b83a9be)
+  CHECK PASS: an HTML error body is the fallback   (got com.example.guidedogtest.voice.RobotCommand$None@5c669da8, expected com.example.guidedogtest.voice.RobotCommand$None@5c669da8)
 
 The LLM-facing vocabulary in SYSTEM_PROMPT (GroqClient.kt) is
   "none|stop|go|forward|backward|turn_left|turn_right|navigate"

@@ -6,6 +6,13 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
+/**
+ * What the walker hears from the obstacle layer.
+ *
+ * One thing is worth saying out loud: the robot has stopped because something is in the middle box.
+ * Everything else it does - driving on, leaning with a route, pivoting because it was asked to - is
+ * either silent or already covered by the voice layer that asked for it.
+ */
 class AvoidanceSpeechManagerTest {
     private var now = 1_000L
     private val spoken = mutableListOf<Pair<String, VoicePriority>>()
@@ -14,44 +21,54 @@ class AvoidanceSpeechManagerTest {
         true
     }
 
-    @Test fun `turn is spoken only on meaningful action changes`() {
-        val right = AvoidanceDecision(AvoidanceState.TURN_RIGHT, WheelSpeeds(140, -140), "TURN RIGHT")
-        val sideScene = SceneAwarenessResult(centerState = SceneZoneState.CAUTION)
-        assertEquals("Obstacle on the left. Turning right.", manager.consider(right, sideScene)?.text)
-        assertNull(manager.consider(right, sideScene))
-        now += AvoidanceSpeechManager.AVOIDANCE_COOLDOWN_MS
-        val left = AvoidanceDecision(AvoidanceState.TURN_LEFT, WheelSpeeds(-140, 140), "TURN LEFT")
-        assertEquals("Obstacle on the right. Turning left.", manager.consider(left, sideScene)?.text)
+    private fun obstacleStop() = AvoidanceDecision(
+        state = AvoidanceState.STOPPED,
+        wheelSpeeds = WheelSpeeds(0, 0),
+        action = "STOP: OBSTACLE AHEAD",
+        stopReason = AvoidanceStop.OBSTACLE,
+    )
+
+    @Test fun `an obstacle stop is spoken once, and not again while it holds`() {
+        val stop = obstacleStop()
+        val first = manager.consider(stop)
+        assertEquals("Obstacle ahead. Stopping.", first?.text)
+        assertEquals(VoicePriority.UNSAFE_PATH, first?.priority)
+
+        // The stop is held frame after frame, so the same words must not repeat frame after frame.
+        assertNull(manager.consider(stop))
+        now += AvoidanceSpeechManager.UNSAFE_COOLDOWN_MS
+        assertNull("the same stop is not re-announced at all", manager.consider(stop))
+        assertEquals(1, spoken.size)
+    }
+
+    @Test fun `driving on is not announced, and clears the way for the next stop`() {
+        assertEquals("Obstacle ahead. Stopping.", manager.consider(obstacleStop())?.text)
+        assertNull(manager.consider(AvoidanceDecision(AvoidanceState.FORWARD, WheelSpeeds(180, 128), "FORWARD")))
+        now += AvoidanceSpeechManager.UNSAFE_COOLDOWN_MS
+        assertEquals("Obstacle ahead. Stopping.", manager.consider(obstacleStop())?.text)
         assertEquals(2, spoken.size)
     }
 
-    @Test fun `blocked center names selected free corridor`() {
-        val scene = SceneAwarenessResult(centerState = SceneZoneState.BLOCKED)
-        val right = AvoidanceDecision(AvoidanceState.TURN_RIGHT, WheelSpeeds(140, -140), "TURN RIGHT")
-        assertEquals("Obstacle ahead. Turning right.", manager.consider(right, scene)?.text)
+    @Test fun `a turn that was asked for is not spoken here`() {
+        // The voice layer that asked for it has already acknowledged, and the route speaks its own cues.
+        assertNull(manager.consider(AvoidanceDecision(AvoidanceState.TURN_LEFT, WheelSpeeds(-140, 140), "PIVOT LEFT")))
+        assertNull(manager.consider(AvoidanceDecision(AvoidanceState.SLOW, WheelSpeeds(158, 113), "STEER RIGHT")))
     }
 
-    @Test fun `a hole beside the robot is not announced as being ahead`() {
-        val beside = AvoidanceDecision(AvoidanceState.FORWARD, WheelSpeeds(180, 128), "FORWARD")
-        val scene = SceneAwarenessResult(leftDrop = true, dropDetected = true)
-        assertNull(manager.consider(beside, scene))
-    }
-
-    @Test fun `drop and no corridor are unsafe path speech`() {
-        val drop = AvoidanceDecision(AvoidanceState.STOPPED, WheelSpeeds(0, 0), "STOP: DROP")
-        // The alert follows what the stop *is*, not the wording of its action string.
-        val blocked = AvoidanceDecision(
-            AvoidanceState.STOPPED,
-            WheelSpeeds(0, 0),
-            "STOP: NO SAFE PATH",
+    @Test fun `a dead link is not called a blocked path`() {
+        // The link's own status line says "disconnected"; a second voice saying "path blocked" for a
+        // dead cable would be a lie.
+        val unlinked = AvoidanceDecision(
+            state = AvoidanceState.STOPPED,
+            wheelSpeeds = WheelSpeeds(0, 0),
+            action = "STOP: ROBOT DISCONNECTED",
             stopReason = AvoidanceStop.UNSAFE,
         )
-        assertEquals("Drop ahead. Stopping.", manager.consider(drop, SceneAwarenessResult(centerDrop = true, dropDetected = true))?.text)
-        now += AvoidanceSpeechManager.UNSAFE_COOLDOWN_MS
-        assertEquals("Path blocked. Stopping.", manager.consider(blocked, SceneAwarenessResult())?.text)
-        // A route hold is the route's own instruction, not a hazard, so it stays silent.
-        val hold = AvoidanceDecision(AvoidanceState.STOPPED, WheelSpeeds(0, 0), "STOP: ROUTE HOLD")
-        assertNull(manager.consider(hold, SceneAwarenessResult()))
-        assertEquals(VoicePriority.UNSAFE_PATH, spoken.last().second)
+        assertNull(manager.consider(unlinked))
+    }
+
+    @Test fun `a stop with no reason is not spoken as one`() {
+        val idle = AvoidanceDecision(AvoidanceState.IDLE, WheelSpeeds(0, 0), "AUTO OFF")
+        assertNull(manager.consider(idle))
     }
 }

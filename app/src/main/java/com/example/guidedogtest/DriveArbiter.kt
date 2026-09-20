@@ -1,26 +1,26 @@
 package com.example.guidedogtest
 
 import com.example.guidedogtest.ocr.AvoidanceDecision
-import com.example.guidedogtest.ocr.AvoidanceState
 import com.example.guidedogtest.ocr.AvoidanceStop
 
 /**
  * Which wheel speeds go on the wire, and who gets to decide them.
  *
- * Two things can drive this car and they answer different questions: the route follower - or the
- * human on the manual buttons - knows *where* to go, the depth controller knows what is *in the way*.
- * Only one of them can own the wheel differential on a given tick, so the split is:
+ * Two things can drive this car and they answer different questions: the human (or the route follower)
+ * knows *where* to go, the depth controller knows what is *in the way*. The split is one-way on
+ * purpose - **the controller may only ever subtract**:
  *
- *  - the controller stops the car outright when it says the way is unsafe: a drop, no corridor, no link;
- *  - it stops the car outright when it cannot see at all, too: an obstacle sensor that has gone quiet
- *    is not a clear road, and the walker is told about that stop rather than walked into something
- *    the robot stopped being able to detect;
- *  - it takes the wheel when it needs to pivot around something, because nothing else knows how;
- *  - it steers, with a bounded bias, when there is something to go around but a way past it;
- *  - otherwise the driving pair goes out untouched.
- *
- * When nobody is driving at all - no route, no manual command - the controller drives on its own,
- * which is what the camera view's AUTO switch is for.
+ *  1. **its stop wins over everything.** Something in the middle box, no link, and the wheels are 0,0
+ *     whatever the human or the route asked for. This is the whole safety contract, and it is the one
+ *     rule that must not depend on which mode the app thinks it is in;
+ *  2. **a route drives**, with the controller's bounded steering bias laid on it - the follower owns
+ *     the differential while it is following;
+ *  3. **a live command drives** when the controller has nothing to say. Not the *absence* of a stop -
+ *     the absence of an opinion. A controller that is switched off, or still waking up, returns
+ *     `IDLE` at zero, and that must never be read as "stop": it used to be, which is why the app
+ *     could say "moving forward" out loud while the wheels stayed still;
+ *  4. **with nobody driving at all, the controller drives** - that is what the camera view's AUTO
+ *     switch is for.
  *
  * Pure logic: no transport, no clock, no Android, so the precedence is testable without a robot.
  */
@@ -31,13 +31,10 @@ object DriveArbiter {
      * @param manual the human's latched command, [WheelSpeeds] `0,0` when the command is STOP.
      * @param avoidance the depth controller's latest decision, or null when avoidance is off.
      */
-    fun resolve(route: WheelSpeeds?, manual: WheelSpeeds, avoidance: AvoidanceDecision?): WheelSpeeds =
-        when {
-            avoidance == null -> route ?: manual
-            avoidance.stopReason != AvoidanceStop.NONE -> WheelSpeeds(0, 0)
-            avoidance.state == AvoidanceState.TURN_LEFT || avoidance.state == AvoidanceState.TURN_RIGHT ->
-                avoidance.wheelSpeeds
-            route != null -> MotorTuning.steered(route, avoidance.steeringBias)
-            else -> avoidance.wheelSpeeds
-        }
+    fun resolve(route: WheelSpeeds?, manual: WheelSpeeds, avoidance: AvoidanceDecision?): WheelSpeeds {
+        if (avoidance != null && avoidance.stopReason != AvoidanceStop.NONE) return WheelSpeeds(0, 0)
+        route?.let { return MotorTuning.steered(it, avoidance?.steeringBias ?: 0) }
+        if (manual != WheelSpeeds(0, 0)) return manual
+        return avoidance?.wheelSpeeds ?: manual
+    }
 }

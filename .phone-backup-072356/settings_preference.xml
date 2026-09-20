@@ -1,0 +1,16 @@
+<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+<map>
+    <long name="gmm_first_launch_timestamp_seconds" value="1789898065" />
+    <string name="baseEventId">UK2vaqDsENqy6LUN8ISS3Ac</string>
+    <string name="cohort">1232</string>
+    <int name="sequenceId" value="605477803" />
+    <int name="terms_accepted_kr" value="1" />
+    <string name="client_parameters_update_source">GWS</string>
+    <string name="cy">CA</string>
+    <int name="settings_version" value="18" />
+    <string name="sticky_server_version_metadata">CgoIBBC+gKzVBhgB&#10;    </string>
+    <string name="previousClientEventId">UK2vaqDsENqy6LUN8ISS3Ac:605477802</string>
+    <string name="account_state">EtICEs8CQ3ZnQkNBRVNxZ0VCcDJzeHJxVVd2bG5SNGhnVURINzJrWUV5U18ySFNKSjFUQlpmUzNW&#10;cXd2azJ1MnhMNVA0N1Z3MW02c0xlN3A0UFBoTmZtTzNCanJ6YnpjdFI0dWJaanp5SHJSek5uOWpU&#10;UmVvNHRFZHpocXpLVTd4WXllMi05ODNlMTlVcHZETEctc3RWUlFjbi1QQTVtVGVNZFJtUm5Hem9R&#10;UzNiNW54TXdSVGF5WGZiczZZSE52MjlGdlZDcGFGaHh1QzNfcnBuR3FzbHUyTVJQSGd1RHd4UVEt&#10;bGVWY3dvamxJZUMzRktGeWdCTWtVQkRpdmVFUjZ6NkxCenY0UEdUU1ZqSU4tRUFjQ3plcUNQSDU2&#10;ZGR1ZDk5NVJPQkdlZzhHWmMtVFA4MDI0TTJtT3ZRYUF3ajV2VGdtaGhocVprQnplbGZMaW5ZQVk=&#10;    </string>
+    <int name="activationId" value="1" />
+    <string name="server_version_metadata">CgoIBBC+gKzVBhgBCggIBhCc9aTVBgoICAEQ6buF1QY=&#10;    </string>
+</map>

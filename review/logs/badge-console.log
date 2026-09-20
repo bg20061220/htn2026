@@ -1,0 +1,4 @@
+=== opened COM8 (attempt 1) ===
+[boot window] read failed: ClearCommError failed (PermissionError(13, 'The device does not recognize the command.', None, 22))
+open attempt 2 failed: could not open port 'COM8': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+open attempt 3 failed: could not open port 'COM8': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)

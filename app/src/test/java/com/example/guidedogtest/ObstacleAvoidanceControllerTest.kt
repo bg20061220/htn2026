@@ -5,281 +5,126 @@ import org.junit.Assert.*
 import org.junit.Test
 
 /**
- * What the robot does about the three boxes.
+ * What the robot does about the middle box - which is now the whole strategy.
  *
- * The decision table, in order: a stop request holds, a drop stops the car, a box that cannot be read
- * is not trusted, a blocked middle turns towards whichever side has room, a caution slows down, and a
- * clear middle drives - steering off the middle of the two side boxes, with a deadband so an uneven
- * wall does not move the wheels.
+ * The depth model is asked one question, and it is a binary one: is something in the middle box? Not
+ * "which side has room", not "how far off the middle of a hallway" - those are second questions, and a
+ * wrong answer to either of them steers the robot into a wall. So:
+ *
+ *  1. something in the middle (yellow or red) -> **stop**;
+ *  2. an empty middle -> **drive on**, on the calibrated straight pair;
+ *  3. nothing readable -> do what was asked, boxes or no boxes.
+ *
+ * Turning only happens when it is asked for: a pivot from a route or a spoken command, or the
+ * follower's lean while it holds a bearing. No box ever turns the robot.
  */
 class ObstacleAvoidanceControllerTest {
     private var now = 1_000L
     private var tick = 0L
     private val controller = ObstacleAvoidanceController(clockMillis = { now })
 
-    @Test fun `a clear path drives forward on the tuned pair`() {
+    @Test fun `an empty middle drives on the calibrated straight pair`() {
         val decision = update()
         assertEquals(AvoidanceState.FORWARD, decision.state)
         assertEquals("FORWARD", decision.action)
         assertEquals(MotorSettings().forward.frame(), decision.wheelSpeeds.frame())
-    }
-
-    @Test fun `a caution box slows down and leaves the steering alone when the sides are even`() {
-        val decision = update(centre = SceneZoneState.CAUTION, centreMeters = 1.2f, leftMeters = 1.0f, rightMeters = 1.0f)
-        assertEquals(AvoidanceState.SLOW, decision.state)
-        assertEquals("SLOW FORWARD", decision.action)
         assertEquals(0, decision.steeringBias)
-        assertTrue("slower than the cruise pair", decision.wheelSpeeds.left < MotorSettings().forward.left)
     }
 
-    @Test fun `a blocked middle turns towards the side with room`() {
-        val decision = update(centre = SceneZoneState.BLOCKED, centreMeters = 0.5f, leftMeters = 1.6f, rightMeters = 0.5f)
-        assertEquals(AvoidanceState.TURN_LEFT, decision.state)
-        assertEquals("PIVOT LEFT", decision.action)
-        assertEquals(MotorTuning.pivotPair(MotorSettings().left).frame(), decision.wheelSpeeds.frame())
-    }
+    @Test fun `anything in the middle stops it`() {
+        // Yellow counts: something within 1.5 m in the middle box is not something to creep past.
+        val caution = update(centre = SceneZoneState.CAUTION, centreMeters = 1.2f)
+        assertEquals(AvoidanceState.STOPPED, caution.state)
+        assertEquals(AvoidanceStop.OBSTACLE, caution.stopReason)
+        assertEquals(WheelSpeeds(0, 0), caution.wheelSpeeds)
 
-    @Test fun `the chosen side is held while the middle stays blocked`() {
-        update(centre = SceneZoneState.BLOCKED, centreMeters = 0.5f, leftMeters = 1.6f, rightMeters = 0.5f)
-        // The other side edges ahead, but only just: a near-tie must not rock the robot left and right.
-        val decision = update(centre = SceneZoneState.BLOCKED, centreMeters = 0.5f, leftMeters = 1.62f, rightMeters = 1.58f)
-        assertEquals(AvoidanceState.TURN_LEFT, decision.state)
-    }
-
-    @Test fun `a blocked middle with nowhere to turn stops`() {
-        val decision = update(
-            left = SceneZoneState.BLOCKED,
-            centre = SceneZoneState.BLOCKED,
-            right = SceneZoneState.BLOCKED,
-            centreMeters = 0.5f,
-            leftMeters = 0.4f,
-            rightMeters = 0.4f,
-        )
-        assertEquals(AvoidanceState.STOPPED, decision.state)
-        assertEquals("STOP: NO SAFE PATH", decision.action)
-        assertEquals(WheelSpeeds(0, 0), decision.wheelSpeeds)
-    }
-
-    @Test fun `green middle with a red side still drives, leaning off the wall`() {
-        val decision = update(left = SceneZoneState.BLOCKED, leftMeters = 0.5f, centreMeters = null, rightMeters = 2.6f)
-        assertEquals(AvoidanceState.FORWARD, decision.state)
-        assertTrue("away from the blocked side", decision.steeringBias > 0)
-    }
-
-    @Test fun `a red middle turns into a yellow side, not just a green one`() {
-        val decision = update(
-            left = SceneZoneState.CAUTION,
-            leftMeters = 1.2f,
-            centre = SceneZoneState.BLOCKED,
-            centreMeters = 0.5f,
-            right = SceneZoneState.BLOCKED,
-            rightMeters = 0.4f,
-        )
-        assertEquals(AvoidanceState.TURN_LEFT, decision.state)
-    }
-
-    @Test fun `a yellow middle with both sides red creeps forward instead of stopping`() {
-        val decision = update(
-            left = SceneZoneState.BLOCKED,
-            leftMeters = 0.5f,
-            centre = SceneZoneState.CAUTION,
-            centreMeters = 1.2f,
-            right = SceneZoneState.BLOCKED,
-            rightMeters = 0.5f,
-        )
-        assertEquals(AvoidanceState.SLOW, decision.state)
-        assertTrue("slower than the cruise pair", decision.wheelSpeeds.left < MotorSettings().forward.left)
-    }
-
-    @Test fun `all red stops and asks for the alert`() {
-        val decision = update(
-            left = SceneZoneState.BLOCKED,
-            centre = SceneZoneState.BLOCKED,
-            right = SceneZoneState.BLOCKED,
-            leftMeters = 0.5f,
-            centreMeters = 0.5f,
-            rightMeters = 0.5f,
-        )
-        assertEquals(AvoidanceState.STOPPED, decision.state)
-        assertEquals(AvoidanceStop.UNSAFE, decision.stopReason)
-        assertEquals(WheelSpeeds(0, 0), decision.wheelSpeeds)
-    }
-
-    @Test fun `a hole beside the robot closes that side and nothing else`() {
-        // The bug from the floor: a drop in the left box used to stop the whole car, so a drain cover
-        // on one side ended the walk. The middle is green, so the walk continues.
-        val decision = update(leftDrop = true, leftMeters = 1.6f, rightMeters = 1.6f)
-        assertEquals(AvoidanceState.FORWARD, decision.state)
-        assertTrue("and it leans away from the hole", decision.steeringBias > 0)
-    }
-
-    @Test fun `a hole beside the robot is not somewhere to turn into`() {
-        val decision = update(
-            leftDrop = true,
-            leftMeters = 2.0f,
-            centre = SceneZoneState.BLOCKED,
-            centreMeters = 0.5f,
-            rightMeters = 1.0f,
-        )
-        assertEquals(AvoidanceState.TURN_RIGHT, decision.state)
-    }
-
-    @Test fun `without a floor model the robot swivels to give the depth module motion`() {
-        // Depth-from-motion needs the camera to move, so standing still forever is not an option and
-        // driving blind is not either: it turns in place, which sweeps the camera and advances nothing.
-        val decision = update(plane = false, leftMeters = null, rightMeters = null)
-        assertEquals(AvoidanceState.TURN_LEFT, decision.state)
-        assertEquals("WARM UP TURN LEFT", decision.action)
-        assertTrue("the swivel is deliberate motion, not a refusal", decision.stopReason == AvoidanceStop.NONE)
-        assertEquals(
-            "the swivel turns on the same gentled pair as every other pivot",
-            MotorTuning.pivotPair(MotorSettings().left).left,
-            decision.wheelSpeeds.left,
-        )
-    }
-
-    @Test fun `the swivel keeps away from a side that reads close`() {
-        val decision = update(plane = false, leftMeters = 0.3f, rightMeters = null)
-        assertEquals(AvoidanceState.TURN_RIGHT, decision.state)
-    }
-
-    @Test fun `no swivel when there is nothing to swivel into but no room either`() {
-        val decision = update(plane = false, leftMeters = 0.2f, rightMeters = 0.2f)
-        assertEquals(AvoidanceState.STOPPED, decision.state)
-        assertEquals(AvoidanceStop.SENSING_UNAVAILABLE, decision.stopReason)
-    }
-
-    @Test fun `the swivel is bounded and then the robot says it cannot see`() {
-        val controller = ObstacleAvoidanceController(clockMillis = { now })
-        val blind = scene(plane = false)
-        var sawStop = false
-        repeat(40) {
-            now += 200
-            val decision = controller.update(blind.copy(depthTimestampNanos = ++tick), true, true, true, true)
-            if (decision.state == AvoidanceState.STOPPED) sawStop = true
-        }
-        assertTrue("the swivel budget runs out instead of turning forever", sawStop)
-    }
-
-    @Test fun `a flickering side box does not take the wheel away from a drive`() {
-        // The complaint this comes from: "it barely gets to move". One frame where a side box reads
-        // red used to start a turn, the turn changed the view, the next frame drove again - so the
-        // robot crossed the room a hand's width at a time.
-        val controller = ObstacleAvoidanceController(clockMillis = { now })
-        assertEquals(AvoidanceState.FORWARD, controller.update(scene(leftMeters = 1.5f, rightMeters = 1.5f), true, true, true, true).state)
-        now += 125
-        val flicker = controller.update(
-            scene(left = SceneZoneState.BLOCKED, leftMeters = 0.5f, rightMeters = 1.5f),
+        val blocked = ObstacleAvoidanceController(clockMillis = { now }).update(
+            scene(centre = SceneZoneState.BLOCKED, centreMeters = 0.5f),
             true, true, true, true,
         )
-        assertEquals("a red side for one frame does not turn the robot", AvoidanceState.FORWARD, flicker.state)
+        assertEquals(AvoidanceState.STOPPED, blocked.state)
+        assertEquals(AvoidanceStop.OBSTACLE, blocked.stopReason)
+        assertEquals(WheelSpeeds(0, 0), blocked.wheelSpeeds)
     }
 
-    @Test fun `a red middle takes the wheel at once, whatever was decided`() {
-        val controller = ObstacleAvoidanceController(clockMillis = { now })
-        controller.update(scene(leftMeters = 1.5f, rightMeters = 1.5f), true, true, true, true)
-        now += 125
-        val blocked = controller.update(
-            scene(leftMeters = 1.6f, centre = SceneZoneState.BLOCKED, centreMeters = 0.5f, rightMeters = 0.5f, right = SceneZoneState.BLOCKED),
-            true, true, true, true,
+    @Test fun `the stop is held until a new command answers it`() {
+        // A box flickers - a step past a doorway, a person shifting their weight, ARCore's depth moving
+        // by centimetres on a flat wall. Resuming on the next frame that reads clear would stutter the
+        // robot across the room, so the stop waits for the walker instead.
+        assertEquals(update(centre = SceneZoneState.BLOCKED, centreMeters = 0.5f).state, AvoidanceState.STOPPED)
+        assertEquals(AvoidanceState.STOPPED, update().state)
+        assertEquals(AvoidanceState.STOPPED, update().state)
+
+        controller.releaseObstacleStop()
+        assertEquals(AvoidanceState.FORWARD, update().state)
+    }
+
+    @Test fun `a stopped robot does not restart itself on frames it cannot read`() {
+        // The trap this closes: depth-from-motion produces nothing while the robot stands still, so a
+        // stopped robot's frames go stale - and a stale frame is not a clear road.
+        update(centre = SceneZoneState.BLOCKED, centreMeters = 0.5f)
+        assertEquals(AvoidanceState.STOPPED, update(plane = false).state)
+        assertEquals(AvoidanceState.STOPPED, controller.update(null, true, true, true, true).state)
+
+        controller.releaseObstacleStop()
+        assertEquals("answered, it goes on the command alone", AvoidanceState.FORWARD, update(plane = false).state)
+    }
+
+    @Test fun `the side boxes do not steer it`() {
+        // The explicit pin: a red side box is not an invitation to turn. It used to be, and it is what
+        // had the robot crossing a room a hand's width at a time.
+        val leftWall = update(left = SceneZoneState.BLOCKED, leftMeters = 0.4f, rightMeters = 2.6f)
+        assertEquals(AvoidanceState.FORWARD, leftWall.state)
+        assertEquals(0, leftWall.steeringBias)
+        assertEquals(MotorSettings().forward.frame(), leftWall.wheelSpeeds.frame())
+
+        val squeezed = update(
+            left = SceneZoneState.BLOCKED, leftMeters = 0.4f,
+            right = SceneZoneState.BLOCKED, rightMeters = 0.4f,
         )
-        assertEquals(AvoidanceState.TURN_LEFT, blocked.state)
+        assertEquals(AvoidanceState.FORWARD, squeezed.state)
+        assertEquals(0, squeezed.steeringBias)
     }
 
-    @Test fun `a stop is never held back`() {
-        val controller = ObstacleAvoidanceController(clockMillis = { now })
-        controller.update(scene(leftMeters = 1.5f, rightMeters = 1.5f), true, true, true, true)
-        now += 125
-        val stopped = controller.update(scene(drop = true, dropZone = SceneZone.CENTER), true, true, true, true)
-        assertEquals(AvoidanceState.STOPPED, stopped.state)
-        assertEquals("STOP: DROP", stopped.action)
-    }
-
-    @Test fun `one unjudgeable frame does not interrupt a drive, but losing sight does`() {
-        val controller = ObstacleAvoidanceController(clockMillis = { now })
-        controller.update(scene(leftMeters = 1.5f, rightMeters = 1.5f), true, true, true, true)
-
-        now += 125
-        val oneBadFrame = controller.update(scene(plane = false), true, true, true, true)
-        assertEquals("one frame without a floor model keeps the drive", AvoidanceState.FORWARD, oneBadFrame.state)
-
-        now += 500
-        val persistent = controller.update(scene(plane = false), true, true, true, true)
-        assertTrue("but losing it for good does not", persistent.state != AvoidanceState.FORWARD)
-    }
-
-    @Test fun `a hole straight ahead stops the car`() {
-        val decision = update(drop = true, dropZone = SceneZone.CENTER)
-        assertEquals(AvoidanceState.STOPPED, decision.state)
-        assertEquals("STOP: DROP", decision.action)
-        assertEquals(WheelSpeeds(0, 0), decision.wheelSpeeds)
-    }
-
-    @Test fun `a scene with nothing readable is never driven on`() {
-        val controller = ObstacleAvoidanceController(clockMillis = { now })
-        val blank = scene(
-            left = SceneZoneState.UNKNOWN,
-            centre = SceneZoneState.UNKNOWN,
-            right = SceneZoneState.UNKNOWN,
-        )
-        // It may look around to get the depth module going, but it must never drive on a scene nothing
-        // can be judged from - and when the looking-around is spent, it stops and says so.
-        var stopped = false
-        repeat(40) {
-            now += 200
-            val decision = controller.update(blank.copy(depthTimestampNanos = ++tick), true, true, true, true)
-            assertTrue(
-                "never a drive without a floor model, got ${decision.state}",
-                decision.state != AvoidanceState.FORWARD && decision.state != AvoidanceState.SLOW,
-            )
-            if (decision.state == AvoidanceState.STOPPED) {
-                assertEquals("STOP: SCENE UNKNOWN", decision.action)
-                stopped = true
-            }
-        }
-        assertTrue("and it does stop in the end", stopped)
-    }
-
-    @Test fun `without a ground plane the boxes are not trusted`() {
-        val controller = ObstacleAvoidanceController(clockMillis = { now })
-        val unmodelled = scene(plane = false, leftMeters = 1.5f, rightMeters = 1.5f, centreMeters = 5f)
-        repeat(30) {
-            now += 200
-            val decision = controller.update(unmodelled.copy(depthTimestampNanos = ++tick), true, true, true, true)
-            // Distances without a floor model are raw readings, not judged ones: whatever they say,
-            // the robot does not drive on them.
-            assertTrue(decision.state != AvoidanceState.FORWARD && decision.state != AvoidanceState.SLOW)
-        }
-    }
-
-    @Test fun `a route asking for a turn eases that way`() {
-        val right = controller.update(scene(), true, true, true, true, DesiredTravelDirection.RIGHT)
+    @Test fun `a route lean is the only steering left`() {
+        val right = controller.update(scene(leftMeters = 1.5f, rightMeters = 1.5f), true, true, true, true, DesiredTravelDirection.RIGHT)
         assertEquals(AvoidanceState.SLOW, right.state)
         assertEquals("STEER RIGHT", right.action)
         assertTrue(right.steeringBias > 0)
 
-        val left = controller.update(scene(), true, true, true, true, DesiredTravelDirection.LEFT)
+        val left = ObstacleAvoidanceController(clockMillis = { now })
+            .update(scene(leftMeters = 1.5f, rightMeters = 1.5f), true, true, true, true, DesiredTravelDirection.LEFT)
         assertEquals("STEER LEFT", left.action)
         assertTrue(left.steeringBias < 0)
     }
 
-    @Test fun `a requested pivot turns that way`() {
-        val decision = controller.update(scene(leftMeters = 1.5f, rightMeters = 1.5f), true, true, true, true, DesiredTravelDirection.PIVOT_RIGHT)
+    @Test fun `a lean does not drive into an obstacle`() {
+        val leaning = controller.update(
+            scene(centre = SceneZoneState.BLOCKED, centreMeters = 0.5f),
+            true, true, true, true, DesiredTravelDirection.RIGHT,
+        )
+        assertEquals(AvoidanceState.STOPPED, leaning.state)
+        assertEquals(AvoidanceStop.OBSTACLE, leaning.stopReason)
+    }
+
+    @Test fun `a pivot that was asked for is never blocked or redirected`() {
+        // A turn in place cannot run into anything, and it is how the robot gets out of a corner - so
+        // the obstacle layer has no vote on it, and it does not pick the other side either.
+        val decision = controller.update(
+            scene(centre = SceneZoneState.BLOCKED, centreMeters = 0.4f, right = SceneZoneState.BLOCKED, rightMeters = 0.3f),
+            true, true, true, true, DesiredTravelDirection.PIVOT_RIGHT,
+        )
         assertEquals(AvoidanceState.TURN_RIGHT, decision.state)
         assertEquals("PIVOT RIGHT", decision.action)
         assertEquals(MotorTuning.pivotPair(MotorSettings().right).frame(), decision.wheelSpeeds.frame())
     }
 
-    @Test fun `a requested pivot into a blocked box turns the other way`() {
+    @Test fun `a pivot works with nothing readable in the frame`() {
         val decision = controller.update(
-            scene(left = SceneZoneState.CAUTION, leftMeters = 1.2f, right = SceneZoneState.BLOCKED, rightMeters = 0.4f),
-            true,
-            true,
-            true,
-            true,
-            DesiredTravelDirection.PIVOT_RIGHT,
+            scene(plane = false), true, true, true, true, DesiredTravelDirection.PIVOT_LEFT,
         )
         assertEquals(AvoidanceState.TURN_LEFT, decision.state)
+        assertEquals(MotorSettings().left.frame(), decision.wheelSpeeds.frame())
     }
 
     @Test fun `a stop request holds`() {
@@ -289,74 +134,68 @@ class ObstacleAvoidanceControllerTest {
         assertEquals(WheelSpeeds(0, 0), decision.wheelSpeeds)
     }
 
-    // --- the middle of a hallway, measured on the two side boxes ----------------------------------
-
-    @Test fun `a slightly uneven hallway wall does not bend the path`() {
-        val decision = update(leftMeters = 1.40f, rightMeters = 1.52f)
-        assertEquals(AvoidanceState.FORWARD, decision.state)
-        assertEquals("FORWARD", decision.action)
-        assertEquals(0, decision.steeringBias)
-        assertEquals(MotorSettings().forward.frame(), decision.wheelSpeeds.frame())
+    @Test fun `no link is the one case that must still stop`() {
+        val decision = controller.update(scene(leftMeters = 1.5f, rightMeters = 1.5f), true, true, true, false)
+        assertEquals(AvoidanceState.STOPPED, decision.state)
+        assertEquals(AvoidanceStop.UNSAFE, decision.stopReason)
     }
 
-    @Test fun `a hallway walked off its middle is corrected towards it`() {
-        val right = update(leftMeters = 0.60f, rightMeters = 1.70f)
-        assertEquals(AvoidanceState.FORWARD, right.state)
-        assertTrue("more room on the right steers right", right.steeringBias > 0)
-        assertEquals("CENTER RIGHT", right.action)
-        assertTrue(right.wheelSpeeds.left > right.wheelSpeeds.right)
+    @Test fun `with the camera or depth not ready it still does what it was told`() {
+        // The regression from the floor: the gates that meant "no picture yet" returned a refusal, so
+        // "go forward" did nothing at all until the depth module warmed up.
+        val noDepth = controller.update(blankScene(), true, true, false, true)
+        assertEquals(AvoidanceState.FORWARD, noDepth.state)
+        assertEquals(MotorSettings().forward.frame(), noDepth.wheelSpeeds.frame())
+        assertFalse(noDepth.obstacleSensingAvailable)
 
-        val left = ObstacleAvoidanceController(clockMillis = { now })
-            .update(scene(leftMeters = 1.70f, rightMeters = 0.60f, left = SceneZoneState.CLEAR, right = SceneZoneState.CLEAR), true, true, true, true)
-        assertTrue("more room on the left steers left", left.steeringBias < 0)
-        assertEquals("CENTER LEFT", left.action)
+        assertEquals(AvoidanceState.FORWARD, controller.update(blankScene(), true, false, false, true).state)
+        assertEquals(AvoidanceState.FORWARD, controller.update(null, true, true, true, true).state)
     }
 
-    @Test fun `the corridor correction grows with the offset and stays bounded`() {
-        val slight = update(leftMeters = 0.90f, rightMeters = 1.50f).steeringBias
-        val strong = update(leftMeters = 0.55f, rightMeters = 1.95f).steeringBias
-        assertTrue("a bigger offset has to ask for more", strong > slight)
-        assertTrue("it stays a nudge", strong <= 45)
+    @Test fun `with nothing in the frame it does the action it was asked for`() {
+        val forward = update(plane = false)
+        assertEquals(AvoidanceState.FORWARD, forward.state)
+        assertEquals(MotorSettings().forward.frame(), forward.wheelSpeeds.frame())
+        assertFalse("and it says it is not watching the path", forward.obstacleSensingAvailable)
     }
 
-    @Test fun `a room is not a hallway`() {
-        assertEquals(0, update(leftMeters = 4.0f, rightMeters = 4.6f).steeringBias)
+    @Test fun `with nothing in the frame a route lean still steers`() {
+        val lean = controller.update(scene(plane = false), true, true, true, true, DesiredTravelDirection.RIGHT)
+        assertEquals(AvoidanceState.SLOW, lean.state)
+        assertTrue("leaning right while it cannot see", lean.steeringBias > 0)
+        assertFalse(lean.obstacleSensingAvailable)
     }
 
-    @Test fun `one wall is not a centre line either`() {
-        assertEquals(0, update(leftMeters = null, rightMeters = 1.2f).steeringBias)
-        assertEquals(0, update(leftMeters = 1.2f, rightMeters = null).steeringBias)
-    }
-
-    @Test fun `hugging a blocked side nudges away from it`() {
-        val huggingLeft = update(left = SceneZoneState.BLOCKED, leftMeters = 0.5f, rightMeters = null)
-        assertTrue("away from the left wall is right", huggingLeft.steeringBias > 0)
-
-        val huggingRight = ObstacleAvoidanceController(clockMillis = { now })
-            .update(scene(right = SceneZoneState.BLOCKED, rightMeters = 0.5f), true, true, true, true)
-        assertTrue("away from the right wall is left", huggingRight.steeringBias < 0)
-    }
-
-    @Test fun `blocked on both sides and clear ahead is not a nudge in either direction`() {
-        val squeezed = update(
-            left = SceneZoneState.BLOCKED,
-            right = SceneZoneState.BLOCKED,
-            leftMeters = 0.5f,
-            rightMeters = 0.5f,
+    @Test fun `with a frame that has gone quiet the last reading stands`() {
+        // A stale frame is not a clear road: what the robot was doing continues, and a box seen a
+        // moment ago is still a box. The watchdog says nothing about sensing - only about the link.
+        assertEquals(AvoidanceState.FORWARD, update().state)
+        now += ObstacleAvoidanceController.SCENE_STALE_TIMEOUT_MS + 1
+        assertEquals(AvoidanceState.FORWARD, controller.update(scene(), true, true, true, true).state)
+        assertEquals(
+            "the link is all the watchdog refuses for",
+            null,
+            controller.watchdog(enabled = true, cameraAvailable = false, depthAvailable = false, robotConnected = true),
         )
-        assertEquals(0, squeezed.steeringBias)
+    }
+
+    @Test fun `a drop is ignored, because it false-fires on this floor`() {
+        val decision = update(drop = true, dropZone = SceneZone.CENTER, plane = false)
+        assertEquals(AvoidanceState.FORWARD, decision.state)
     }
 
     @Test fun `every command that moves clears the motor floor`() {
         listOf(
-            update(leftMeters = 0.6f, rightMeters = 1.7f),
-            update(centre = SceneZoneState.CAUTION, centreMeters = 1.1f),
-            update(centre = SceneZoneState.BLOCKED, centreMeters = 0.5f, leftMeters = 1.6f, rightMeters = 0.5f),
-            update(left = SceneZoneState.BLOCKED, leftMeters = 0.5f, rightMeters = 1.4f),
+            update(),
+            controller.update(scene(), true, true, true, true, DesiredTravelDirection.RIGHT),
+            controller.update(scene(), true, true, true, true, DesiredTravelDirection.PIVOT_LEFT),
+            controller.update(scene(), true, true, true, true, DesiredTravelDirection.PIVOT_RIGHT),
         ).flatMap { listOf(it.wheelSpeeds.left, it.wheelSpeeds.right) }
             .filter { it != 0 }
             .forEach { assertTrue(kotlin.math.abs(it) >= ObstacleAvoidanceController.MIN_EFFECTIVE_MOTOR_SPEED) }
     }
+
+    private fun blankScene() = SceneAwarenessResult()
 
     private fun update(
         left: SceneZoneState = SceneZoneState.CLEAR,

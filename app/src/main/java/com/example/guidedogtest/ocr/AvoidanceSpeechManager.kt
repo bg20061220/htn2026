@@ -13,8 +13,8 @@ class AvoidanceSpeechManager(
     private var lastSignature: String? = null
     private var lastSpokenMillis = Long.MIN_VALUE
 
-    fun consider(decision: AvoidanceDecision, scene: SceneAwarenessResult?): AvoidanceSpeech? {
-        val message = messageFor(decision, scene) ?: run {
+    fun consider(decision: AvoidanceDecision): AvoidanceSpeech? {
+        val message = messageFor(decision) ?: run {
             if (decision.state == AvoidanceState.FORWARD) lastSignature = "FORWARD"
             return null
         }
@@ -30,30 +30,19 @@ class AvoidanceSpeechManager(
 
     fun reset() { lastSignature = null; lastSpokenMillis = Long.MIN_VALUE }
 
-    internal fun messageFor(decision: AvoidanceDecision, scene: SceneAwarenessResult?): AvoidanceSpeech? {
-        if (decision.state == AvoidanceState.STOPPED) return when {
-            decision.action == "EMERGENCY STOP" -> null
-            // Spoken from what the stop *is*, not from the words in the action string: the action is
-            // for the bench, and an alert that depends on its exact spelling goes silent the moment
-            // somebody renames it.
-            // "Ahead" has to mean ahead: a hole beside the robot does not stop the car, so it must
-            // not be announced as if it were in the way.
-            scene?.centerDrop == true || decision.action == "STOP: DROP" ->
-                AvoidanceSpeech("Drop ahead. Stopping.", VoicePriority.UNSAFE_PATH)
-            decision.stopReason == AvoidanceStop.UNSAFE ->
-                AvoidanceSpeech("Path blocked. Stopping.", VoicePriority.UNSAFE_PATH)
-            else -> null
-        }
-        // A warm-up swivel is the robot looking around, not avoiding anything: there is nothing to
-        // announce, and "obstacle on the left" for a robot that cannot see would be a lie.
-        if (decision.action.startsWith("WARM UP")) return null
-        return when (decision.state) {
-            AvoidanceState.TURN_LEFT -> AvoidanceSpeech(
-                if (scene?.centerState == SceneZoneState.BLOCKED) "Obstacle ahead. Turning left."
-                else "Obstacle on the right. Turning left.", VoicePriority.AVOIDANCE)
-            AvoidanceState.TURN_RIGHT -> AvoidanceSpeech(
-                if (scene?.centerState == SceneZoneState.BLOCKED) "Obstacle ahead. Turning right."
-                else "Obstacle on the left. Turning right.", VoicePriority.AVOIDANCE)
+    /**
+     * What the walker hears, from the decision alone.
+     *
+     * One thing is worth saying out loud now: the robot has stopped because something is in the middle
+     * box. A lost link is not spoken here - the link's own status line says "disconnected", and a
+     * second voice saying "path blocked" for a dead cable would be a lie. The action string is not
+     * read: an alert that depends on its exact spelling goes silent the moment somebody renames it.
+     */
+    internal fun messageFor(decision: AvoidanceDecision): AvoidanceSpeech? {
+        if (decision.state != AvoidanceState.STOPPED) return null
+        return when (decision.stopReason) {
+            AvoidanceStop.OBSTACLE ->
+                AvoidanceSpeech("Obstacle ahead. Stopping.", VoicePriority.UNSAFE_PATH)
             else -> null
         }
     }

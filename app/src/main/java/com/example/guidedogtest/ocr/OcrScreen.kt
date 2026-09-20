@@ -71,6 +71,14 @@ fun OcrScreen(
     routeNavigationActive: Boolean = false,
     desiredRouteDirection: DesiredTravelDirection = DesiredTravelDirection.FORWARD,
     emergencyStopSignal: Long = 0L,
+    /**
+     * Bumped by the owner every time it issues a fresh drive command (a spoken "go forward", a page
+     * button, the switch coming on). It is how the controller is told that the walker has answered an
+     * obstacle stop, so the next frames are judged afresh and the robot can start again.
+     */
+    driveCommandSeq: Int = 0,
+    /** The camera page's own "go forward": the host arms the layer and drives. See its handler. */
+    onGoForward: () -> Unit = {},
     onAutonomousAvoidanceEnabled: (Boolean) -> Unit = {},
     onAvoidanceDecision: (AvoidanceDecision) -> Unit = {},
     /** The scene, reduced to what the conversation may state. Fired with every decision. */
@@ -147,6 +155,8 @@ fun OcrScreen(
                     routeNavigationActive = routeNavigationActive,
                     desiredRouteDirection = desiredRouteDirection,
                     emergencyStopSignal = emergencyStopSignal,
+                    driveCommandSeq = driveCommandSeq,
+                    onGoForward = onGoForward,
                     onAutonomousAvoidanceEnabled = onAutonomousAvoidanceEnabled,
                     onAvoidanceDecision = onAvoidanceDecision,
                     onSceneSnapshot = onSceneSnapshot,
@@ -183,6 +193,8 @@ private fun OcrCameraContent(
     routeNavigationActive: Boolean,
     desiredRouteDirection: DesiredTravelDirection,
     emergencyStopSignal: Long,
+    driveCommandSeq: Int,
+    onGoForward: () -> Unit,
     onAutonomousAvoidanceEnabled: (Boolean) -> Unit,
     onAvoidanceDecision: (AvoidanceDecision) -> Unit,
     onSceneSnapshot: (SensorSnapshot) -> Unit,
@@ -214,6 +226,19 @@ private fun OcrCameraContent(
     val currentMotorSettings by androidx.compose.runtime.rememberUpdatedState(motorSettings)
     val avoidanceController = remember { ObstacleAvoidanceController(tuning = { currentMotorSettings }) }
     val avoidanceSpeechManager = remember { AvoidanceSpeechManager(speak = speakAvoidanceAlert) }
+
+    // The host is the authority on whether the layer is armed: a spoken "go forward" sets it while
+    // this page is already open, and the page has to follow, or the layer would sit switched off
+    // while the app believed it was watching the path.
+    LaunchedEffect(initialAutonomousEnabled) {
+        autonomousEnabled = initialAutonomousEnabled
+    }
+
+    // A fresh command - a spoken "go forward", a page button, the switch coming on - is the walker
+    // answering the stop the robot latched: the next frames are judged afresh.
+    LaunchedEffect(driveCommandSeq) {
+        if (driveCommandSeq > 0) avoidanceController.releaseObstacleStop()
+    }
 
     LaunchedEffect(emergencyStopSignal) {
         if (emergencyStopSignal > 0L) {
@@ -274,7 +299,7 @@ private fun OcrCameraContent(
                 isMoving = autonomousEnabled && avoidanceDecision.state.isDriving()
             )
         )
-        if (autonomousEnabled) avoidanceSpeechManager.consider(avoidanceDecision, scene)
+        if (autonomousEnabled) avoidanceSpeechManager.consider(avoidanceDecision)
     }
 
     // The dialog's copy of the autonomy flag follows the screen that owns it, in both directions.
@@ -316,7 +341,7 @@ private fun OcrCameraContent(
             )?.let {
                 avoidanceDecision = it
                 onAvoidanceDecision(it)
-                avoidanceSpeechManager.consider(it, rawSceneAwareness)
+                avoidanceSpeechManager.consider(it)
             }
             delay(WATCHDOG_INTERVAL_MS)
         }
@@ -390,6 +415,39 @@ private fun OcrCameraContent(
                 .verticalScroll(rememberScrollState())
         ) {
 
+        // First thing in the panel, and the only two controls a demo needs: go, and stop. The
+        // diagnostics below are for the bench, and in landscape they are below the fold - a fallback
+        // button you have to scroll to find in front of an audience is not a fallback.
+        Text("AUTO: ${if (autonomousEnabled) "ON" else "OFF"} • Action: ${avoidanceDecision.action}")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // The demo's fallback: if the microphone misses, this arms the layer and drives in one
+            // press, and it is also the answer to a latched obstacle stop.
+            Button(
+                onClick = {
+                    autonomousEnabled = true
+                    onGoForward()
+                },
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("GO FORWARD")
+            }
+            Button(
+                onClick = {
+                    autonomousEnabled = false
+                    avoidanceDecision = AvoidanceDecision(
+                        AvoidanceState.STOPPED,
+                        WheelSpeeds(0, 0),
+                        "MANUAL STOP"
+                    )
+                    onAutonomousAvoidanceEnabled(false)
+                },
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("STOP")
+            }
+        }
+
+
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -461,25 +519,11 @@ private fun OcrCameraContent(
                 }
             )
         }
-        Text("AUTO: ${if (autonomousEnabled) "ON" else "OFF"} • Action: ${avoidanceDecision.action}")
         Text("NAVIGATION: ${if (routeNavigationActive) "ACTIVE" else "INACTIVE"}", style = MaterialTheme.typography.labelSmall)
         Text("Target direction: $effectiveDirection", style = MaterialTheme.typography.labelSmall)
         Text("Local action: ${avoidanceDecision.action}", style = MaterialTheme.typography.labelSmall)
         Text("Off middle: ${avoidanceDecision.offMiddle?.let { String.format(java.util.Locale.US, "%+.2f", it) } ?: "--"}", style = MaterialTheme.typography.labelSmall)
         Text("Motor output: L: ${avoidanceDecision.wheelSpeeds.left}  R: ${avoidanceDecision.wheelSpeeds.right}", style = MaterialTheme.typography.labelSmall)
-        Button(onClick = {
-            autonomousEnabled = false
-            onAutonomousAvoidanceEnabled(false)
-            avoidanceDecision = AvoidanceDecision(
-                AvoidanceState.STOPPED,
-                WheelSpeeds(0, 0),
-                "MANUAL STOP"
-            )
-            onAutonomousAvoidanceEnabled(false)
-        }) {
-            Text("STOP")
-        }
-
         Text(
             text = if (objectDetections.isEmpty()) {
                 "Objects: none detected"
@@ -582,15 +626,15 @@ private fun SceneAwarenessPanel(result: SceneAwarenessResult?) {
                         "Support: TRACKED   Drop: ${if (value.dropDetected) "DETECTED" else "none"}"
                     // Two faults, two answers: an empty depth frame is ARCore not measuring at all,
                     // a full one with no floor in it is where the camera is pointed.
+                    // Either way the robot is driving on the command alone, so say that rather than
+                    // pretending it is watching the path.
                     value.depthEmpty ->
                         "Support: NO DEPTH from the camera (ARCore is returning empty frames) - " +
-                            "nothing can be judged, so the robot will not drive. Close and reopen the " +
-                            "camera view, or check the depth module."
+                            "driving on the command alone, obstacle detection OFF."
                     else ->
-                        "Support: NO FLOOR IN THE DEPTH IMAGE - ARCore's depth covers the middle of " +
-                            "the camera picture, so if the floor is only along the bottom edge it is " +
-                            "not measured at all. Tilt the phone down until the floor is in the " +
-                            "middle of the preview. Nothing is judged from the distances below."
+                        "Support: NO FLOOR IN THE DEPTH IMAGE (ARCore's depth is the middle of the " +
+                            "camera picture, so a floor along the bottom edge is not measured) - " +
+                            "driving on the command alone, obstacle detection OFF."
                 }
             )
             SceneAwarenessAnalyzer.ZONES.forEach { zone ->

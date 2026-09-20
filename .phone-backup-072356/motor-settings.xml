@@ -1,0 +1,9 @@
+<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+<map>
+    <int name="left.left" value="-190" />
+    <int name="forward.right" value="230" />
+    <int name="left.right" value="-170" />
+    <int name="right.right" value="180" />
+    <int name="forward.left" value="-235" />
+    <int name="right.left" value="190" />
+</map>

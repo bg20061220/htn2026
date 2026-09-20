@@ -24,7 +24,10 @@ fun SceneAwarenessResult.toSensorSnapshot(isMoving: Boolean): SensorSnapshot {
             ?: SensorSnapshot.NO_HAZARD_MM,
         obstacleLeft = leftState == SceneZoneState.BLOCKED,
         obstacleRight = rightState == SceneZoneState.BLOCKED,
-        dropoffDetected = dropDetected,
+        // Not reported: the drop signal false-fires on this floor (a glossy surface reads past the
+        // ground plane), so nothing acts on it and nothing claims it - the plumbing stays for the ToF
+        // sensor when it is fitted.
+        dropoffDetected = false,
         isMoving = isMoving,
         hazardsKnown = depthLive,
     )

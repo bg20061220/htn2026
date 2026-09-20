@@ -1,0 +1,16 @@
+middle-box stop: what the controller hands the arbiter, frame by frame
+rule: anything in the middle box -> stop; empty middle -> drive on the calibrated pair
+      nothing readable -> do what was asked; the stop is held until a new command
+
+walking, nothing in front                                        -> FORWARD    FORWARD                    L= 180 R= 128
+an obstacle arrives in the middle box                            -> STOPPED    STOP: OBSTACLE AHEAD       L=   0 R=   0  (OBSTACLE)
+the next frame reads clear again (a flicker)                     -> STOPPED    STOP: OBSTACLE AHEAD       L=   0 R=   0  (OBSTACLE)
+two more clear frames                                            -> STOPPED    STOP: OBSTACLE AHEAD       L=   0 R=   0  (OBSTACLE)
+the robot is still, so its depth goes stale                      -> STOPPED    STOP: OBSTACLE AHEAD       L=   0 R=   0  (OBSTACLE)
+no frame at all                                                  -> STOPPED    STOP: OBSTACLE AHEAD       L=   0 R=   0  (OBSTACLE)
+the walker answers the stop: "go on"                             -> FORWARD    FORWARD                    L= 180 R= 128
+the obstacle is still there after the answer                     -> STOPPED    STOP: OBSTACLE AHEAD       L=   0 R=   0  (OBSTACLE)
+it is gone, and the walker answers again                         -> FORWARD    FORWARD                    L= 180 R= 128
+
+a side box goes red in a clear hallway (no steering, no turn)    -> FORWARD    FORWARD                    L= 180 R= 128
+no link to the car                                               -> STOPPED    STOP: ROBOT DISCONNECTED   L=   0 R=   0  (UNSAFE)

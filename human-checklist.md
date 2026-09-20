@@ -389,92 +389,131 @@ by 0.45 m is a drop**. That is the whole difference between a robot that walks d
 that reports an obstacle at arm's length from a flat carpet, and it is why a box holding nothing but
 floor reports no distance at all rather than a hazard.
 
+## Before you trust the obstacle stop (on the car, 10 minutes)
+
+The obstacle stop is only as good as the floor model, and the floor model is only as good as where the
+phone is pointing. Run this check before the demo, and again any time the phone has been knocked or
+carried:
+
+```
+python review/harness/floor_check.py          # 12 seconds, then a verdict
+```
+
+**What it must print:**
+
+```
+VERDICT: GOOD - the floor is in the depth image and a plane is fitted through it.
+  support rows 3 of 3, floor at 1.5,1.5,1.6 m, slope 0.46
+  obstacle detection is on: anything in the middle box now stops the car.
+```
+
+behind that, in `adb logcat -s Boxes`:
+
+```
+sampled 201, depth returned 201 | support rows 3 of 3 (need 2) from rows 9,8,7, depths 1.5,1.5,1.6, fit ok (slope 0.46)
+```
+
+**Two controls, top of the camera page, and they are the demo's fallback:** *GO FORWARD* arms the depth
+layer, releases a stop and drives, all in one press; *STOP* kills the drive. Both are above the
+diagnostics, so they are on screen without scrolling — a fallback you have to hunt for is not one, and
+if the microphone misses in a loud room, *GO FORWARD* is the whole demo.
+
+**Who may drive, and who may veto (the rule the wheels follow):**
+
+| | |
+|---|---|
+| the depth layer says **stop** (something in the middle box, or no link) | the wheels are `0,0`, whatever anyone else asked. This is the safety contract |
+| a **route** is being followed | the follower's pair, with the layer's lean laid on it |
+| a **live command** is latched (voice, GO FORWARD, the pages' buttons) | it drives — unless the layer is stopping it |
+| **nobody** is driving | the layer drives (this is the camera page's AUTO switch) |
+
+The layer's *silence is not a stop*: a controller that is switched off, or still waking up, must never
+be the reason a spoken "go forward" produces a spoken acknowledgement and no wheels.
+
+**The pages' own FORWARD/LEFT/RIGHT buttons are manual mode** — they drive without the depth layer
+watching, on purpose, so a person can always push the robot through a false-positive stop. For the
+demo, drive with **voice** or with **GO FORWARD**; those arm the layer.
+
+**The mount has to pitch the camera down at the path, not at the floor under the bumper.** ARCore's
+depth covers only the middle of the picture (display y 0..1 maps to depth v 0.13..0.87), so:
+
+- aim roughly **20-25 degrees down**, with the floor you are about to walk on sitting at **0.65-0.90 of
+  the frame, 1.5-3 m ahead**;
+- a phone pointed at your feet puts the floor at the bottom edge, where there is no depth at all;
+- a phone levelled at a wall puts the wall in the band instead of the floor, and the floor model dies.
+
+**If the verdict is not GOOD**, it says which of the four states it is in and what to change:
+
+| verdict | what the depth is doing | what to do |
+|---|---|---|
+| `NO-FRAME` (`nonzero 0/14400`) | ARCore has produced no depth image yet | pan the phone slowly across the room for a second or two; depth is depth-from-motion |
+| `UNUSABLE` (`in range 0`, column reading tens of metres) | depth arrived, nothing inside 0.15-8 m: the view cannot be triangulated | pitch the camera up towards the path; move away from a close, low-texture floor |
+| `NO-FLOOR` (`in range` large, `fit FAILED`) | depth is real but no floor inside the boxes' band | the floor is above or below the band: change the mount pitch |
+| `NO LOGS` | the camera view is not open | open CAMERA VIEW, or say *"goose, go forward"* |
+
+**One thing to expect at the start of a walk:** a phone that is standing still gets no depth, so the
+first seconds read `in range 0` and the panel says *"driving on the command alone, obstacle detection
+OFF"*. It is not a fault - it drives on the command, and the boxes load as it moves. To see the stop,
+give it a second of walking first, then put something in the middle box.
+
+## The live-demo path (if the depth needs more time than we have)
+
+Depth-from-motion is the one part that is not reliable yet, so the demo does not lean on it. Voice
+motion goes **straight to the tuned wheel pairs** - the same path the pages' own buttons take - with no
+camera and no depth in the loop. Obstacle avoidance stays on the camera view's AUTO switch, where it can
+be shown on its own if a walk goes well.
+
+**Rehearse these four, in this order. Everything else is optional.**
+
+1. **It leads.** Robot on the floor, cable in, "Goose, go forward" -> it walks. Bare "stop" (no wake
+   word, no network) -> it stops. Say it twice; it is the beat the judges remember.
+2. **It turns.** "Goose, turn left" -> it pivots on the tuned pair; "stop" ends it. (A spoken turn is
+   latched: it keeps turning until you stop it, exactly like the page buttons.)
+3. **It reads.** Camera view, point at a printed sign -> it says the sign out loud.
+4. **It talks.** "Goose, describe this room" -> the persona answer, spoken by ElevenLabs.
+
+**The obstacle beat, if the panel says the boxes loaded** (`Boxes ... fit ok`): walk towards something
+- a chair, a person's legs - and it stops and says *"Obstacle ahead. Stopping."* Move it out of the way,
+say **"goose, go forward"**, and it walks on. That exchange *is* the feature: it stops, you decide. If
+the panel says `no fit`, do not mention obstacle avoidance - the honest line is *"obstacle sensing is the
+part still hardening"*, and the walk you just did is the pitch anyway.
+
+**When something goes wrong on stage:**
+
+| symptom | do this |
+|---|---|
+| it does not move | the panel's link line must read `USB`; check the battery frame is not `b0.00 V`; tap the page's FORWARD button - if that works, it is voice, not the robot |
+| wake word misses in a loud room | press **GO FORWARD** on the camera page - same path, one press, and it arms the depth layer too |
+| no Wi-Fi | the stop word, the motors and sign reading all still work; say *"the brain is offline, the dog still walks"* and keep going |
+| depth look on the S21 screen is grey | press STOP and carry on with beats 1-4; that is the whole demo |
+| worst case | a 40-second video of beats 1-4, filmed here, played while you narrate |
+
+**The safety answer, whatever happens:** the firmware stops the motors on its own if the phone stops
+sending the heartbeat for half a second, and "stop" needs no network and no depth.
+
 **What the robot does about them — the rule, in the words we asked for it:**
 
-| the boxes | the robot |
+| the middle box | the robot |
 |---|---|
-| centre **green** | drive on (cruising on the tuned FORWARD pair, leaning off a wall that is hard against one side, or holding the middle of a hallway) |
-| centre **red**, a side **green or yellow** | turn in place towards that side, on the tuned LEFT/RIGHT pair, and **hold** that side while the middle stays red so a near-tie cannot rock it left and right |
-| centre **yellow** | creep past: the cautious pair, steering off the nearer side |
-| **all three red** | stop, and say *"Path blocked. Stopping."* |
-| a **drop in the centre** box | stop, and say *"Drop ahead. Stopping."* |
-| a **drop in a side** box | **keep going** — that side is closed off, exactly like a wall, and the car leans away from it. A hole beside the robot is not in its path, and stopping for it is how a drain cover ends a walk |
+| **empty** | drive on, on the calibrated straight pair. Nothing else steers it: a red side box is not a turn |
+| **anything in it** (yellow or red) | **stop**, and say *"Obstacle ahead. Stopping."* |
+| nothing readable (camera or depth not up, no frame, a stale frame, no floor model) | drive on the command alone — it never refuses to start |
+| a requested turn, or a route asking for a lean | do exactly that: pivot, or creep and steer. The obstacle layer has no vote on a turn it was asked for |
 
-**The colours come from the floor, and the floor has to be inside ARCore's depth picture.** Measured
-on the S21 holding the phone **upright** (so its rear camera points at the horizon): the depth image
-held nothing but corridor — a column down its middle read 6.4, 6.4, 6.6 … 6.8 m top to bottom, no near
-field at all, because ARCore's depth covers only the **middle ~74 % of the camera picture** (the
-depth-image corners map to texture v 0.13–0.87). The floor, plainly visible along the bottom of the
-preview, is *below* the measured region, and ARCore fills that strip with the far edge value. Result:
-no floor model, every box grey, and the robot refusing to move — correctly, because a robot that
-cannot see the floor in front of it cannot tell floor from stairwell.
+The depth model is asked **one question**, and it is binary: *is something in the middle box?* The side
+boxes are not consulted — "which side has room" is a second question to get right, and a wrong answer to
+it steers the robot into a wall.
 
-**And depth needs motion — this is the one that will bite first.** The S21 has no ToF sensor, so
-ARCore's Depth API is *depth-from-motion*: it estimates depth from the camera moving over time
-(parallax). A stationary phone gets coarse, empty or degenerate depth, which is exactly what every
-measurement above shows — all of them were taken with the phone sitting still, and the result was
-either nothing at all (`nonzero 0/14400`) or a flat far-field slab (`6.4 … 6.8 m`, slope 0.00, no
-floor at any row).
+**The stop is held until you answer it.** A box flickers (a step past a doorway, someone shifting their
+weight, ARCore's depth moving by centimetres on a flat wall), and resuming on the next frame that reads
+clear would stutter the robot across the room. So: it stops, it stays stopped, and **"goose, go
+forward"** (or a page button, or the AUTO switch) is what starts it again. That is also what a guide dog
+does — it stops, and the handler decides.
 
-That creates a real deadlock to know about before the floor test: **the robot needs to move to see the
-floor, and it needs to see the floor to move.** What that looks like in practice:
-
-- Before refusing anything, the robot **swivels in place** to make the motion itself: it turns slowly
-  one way, then the other, in 400 ms swings for up to 2.5 s. A pivot sweeps the camera along an arc —
-  which is the parallax depth-from-motion needs — and it *advances* the robot into nothing it cannot
-  see. It uses the tuned turn pair scaled down to 60 %, it will not swing towards a side whose raw
-  distance reads nearer than 0.45 m, and it stays silent while doing it (this is the robot looking
-  around, not avoiding anything).
-- If that budget runs out with no floor model, it stops and the panel says why. **If the robot is
-  standing still and grey on the floor test, watch the swivel: it should sweep, the plane should fit
-  within a swing or two, and the boxes should colour in.** A hand or the leash on the handle does the
-  same thing if the swivel is not enough.
-- **Test this on the floor before anything else:** hold the robot still, watch `adb logcat -s Boxes`
-  (the `depth not ready N` count in the `DepthCamera` line is this exact case), then push it slowly
-  forward and watch the column profile change from a flat far slab to a real floor (something like
-  `0.8, 1.1, 1.5, 2.0 …` down the image) and `fit ok` appear.
-
-So the mounting rule is: **tilt the phone down until the floor sits in the middle of the preview, not
-just along its bottom edge**, and expect to nudge the robot to get the first depth frame. On the robot (screen up, flat on the top plate) the rear camera already
-looks down at the floor, which is the configuration the depth module wants. The panel says which of
-the three states it is in — `TRACKED`, `NO DEPTH …` (ARCore returning empty frames) or `NO FLOOR IN THE
-DEPTH IMAGE …` (aim) — and prints the raw distances either way, so "the camera sees 6.8 m of corridor"
-can never be mistaken for "the camera sees nothing".
-
-**It keeps moving: a decision is held for `DECISION_HOLD_MS` (900 ms).** The boxes flicker — ARCore's
-depth shifts by centimetres frame to frame on a flat wall, and a person walking past changes a box for
-one frame — and with a decision every 125 ms that flicker *was* the robot's behaviour: forward, a red
-side box for one frame, turn, the turn changes the view, forward again, and it crossed the room a
-hand's width at a time. Now:
-
-- a **drive is held for 900 ms**: a flickering side box, a slowdown or a turn request waits, while the
-  middle box stays green;
-- a **red middle box still takes the wheel at once** — that is the thing pivoting is for;
-- a **stop is never held back** (a drop, no safe path, or losing sight all act on the frame they arrive);
-- **one unjudgeable frame does not count as losing sight** (`PLANE_LOSS_GRACE_MS` 250 ms): depth
-  flickers, and reacting to a single empty frame was triggering the warm-up swivel mid-walk.
-- and while following a route, the bearing error at which the car *stops to rotate* went from 25° to
-  **`alignStartDegrees` 45°**: up to that it keeps walking and steers hard (1.2 PWM per degree, clamped
-  at 60) instead of pivoting every time the compass or GPS heading wobbles.
-
-**One knob for how hard it turns: `MotorTuning.PIVOT_FRACTION` (0.6).** Every *automatic* pivot — the
-obstacle turn, a route step's turn, a spoken "turn left/right" and the warm-up swivel — uses that
-share of the pair on the Configure Robot page (205/190 becomes 123/114). Raise it towards 1.0 for
-sharper turns; **do not go below ~0.55**, because the pair is floored at the motor minimum and past
-that point both wheels sit at 110, the tuned left/right asymmetry (which is what makes this chassis
-rotate on the spot instead of curving) disappears, and the easing ramp stops showing. The manual
-LEFT/RIGHT buttons on the page are deliberately *not* scaled — they are the bench test.
-
-**A spoken turn lasts [VOICE_TURN_MS] 1.2 s**, then the robot goes back to driving on what the boxes
-say — a turn is a moment, not a mode. Say "turn left" again to turn further. (Before this, the pivot
-request sat in the intent until something else cleared it, so a clear middle never got to drive
-again.)
-
-Two cases the rule does not name, and what it does: a **yellow** middle with both sides red creeps
-forward instead of stopping (something 1.5 m ahead is not a collision yet — the stop arrives as soon
-as the middle turns red), and a **green** middle with a wall in one side box keeps driving while
-leaning away from it. A route asking for a left/right lean is not an obstacle decision at all: the car
-creeps and steers, which is what the follower got before the boxes existed.
+There is **no creep-across-a-caution state and no turning** left in the obstacle layer: the robot drives
+on an empty middle and stops on anything else. That is the simplest thing to watch on the floor, it is
+what stopped it inching forward a hand's width at a time, and it is the one question the depth model can
+be asked without a wrong answer steering the robot into a wall. The drop signal is ignored entirely.
 
 **Speed — what the decision path actually costs, measured on the S21** (`adb logcat -s DepthCamera
 Boxes Avoidance`):

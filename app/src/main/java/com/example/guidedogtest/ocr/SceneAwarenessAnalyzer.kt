@@ -212,7 +212,12 @@ class SceneAwarenessAnalyzer(private val thresholds: SceneAwarenessThresholds = 
         // What the frame itself contains, before any of our arithmetic: if the depth module is handing
         // back an empty picture, nothing downstream can be fixed by tuning thresholds.
         val nonZero = depth.millimeters.count { it != 0 }
-        lastDepthWasEmpty = nonZero == 0
+        // "Non-zero" is not the same as "usable": ARCore hands back a saturated far value for a surface
+        // it could not triangulate, so a frame can be 100% non-zero and still have nothing the sampler
+        // will accept. Counting what is actually inside the sampler's window is the number that answers
+        // "why is there no floor" - 14,400 valid pixels and 0 in range is a view problem, not a bug.
+        val inRange = depth.millimeters.count { it in MIN_DEPTH_MM..MAX_DEPTH_MM }
+        lastDepthWasEmpty = inRange == 0
         val centrePoint = screenToTexture(0.5f, 0.7f, depth.displayTextureCorners)
         // The whole point of this line: where the floor actually is inside the depth image. A column
         // down the middle, top to bottom, in metres - the near floor shows up as a sharp step, and the
@@ -222,9 +227,9 @@ class SceneAwarenessAnalyzer(private val thresholds: SceneAwarenessThresholds = 
             val millimetres = depth.millimeters[row * depth.width + depth.width / 2]
             if (millimetres == 0) "--" else "%.1f".format(millimetres / 1000f)
         }
-        lastDepthReport = "depth %dx%d nonzero %d/%d, screen(0.5,0.7)->texture(%.2f,%.2f), corners [%s], column %s"
+        lastDepthReport = "depth %dx%d nonzero %d/%d (in range %d), screen(0.5,0.7)->texture(%.2f,%.2f), corners [%s], column %s"
             .format(
-                depth.width, depth.height, nonZero, depth.millimeters.size,
+                depth.width, depth.height, nonZero, depth.millimeters.size, inRange,
                 centrePoint.first, centrePoint.second,
                 depth.displayTextureCorners.joinToString(",") { "%.2f".format(it) },
                 columnProfile,
@@ -441,7 +446,7 @@ class SceneAwarenessAnalyzer(private val thresholds: SceneAwarenessThresholds = 
         if (!u.isFinite() || !v.isFinite() || u !in 0f..1f || v !in 0f..1f) return null
         val x = (u * (depth.width - 1)).roundToInt()
         val y = (v * (depth.height - 1)).roundToInt()
-        return depth.millimeters[y * depth.width + x].takeIf { it in 150..8_000 }
+        return depth.millimeters[y * depth.width + x].takeIf { it in MIN_DEPTH_MM..MAX_DEPTH_MM }
     }
 
     companion object {
@@ -470,6 +475,10 @@ class SceneAwarenessAnalyzer(private val thresholds: SceneAwarenessThresholds = 
         /** The right edge of a box, as a fraction of the image width. */
         fun zoneRight(zone: SceneZone): Float = zoneLeft(zone) +
             (REGION_RIGHT - REGION_LEFT) / SceneZone.entries.size
+
+        /** The sampler's window, in millimetres: nearer is noise on the lens, further is not a wall. */
+        const val MIN_DEPTH_MM = 150
+        const val MAX_DEPTH_MM = 8_000
 
         const val GROUND_PLANE_TOLERANCE_METERS = 0.14f
         const val SELF_MASK_LEFT = 0.43f

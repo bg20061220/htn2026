@@ -1,0 +1,131 @@
+COMMAND (from the repository root), in order:
+  .tools\arduino.cmd upload -p COM8 --fqbn "esp32:esp32:esp32c3:CDCOnBoot=cdc,FlashMode=dio,FlashFreq=80,FlashSize=4M,PartitionScheme=no_ota" remote/badge_controller
+  .tools\arduino.cmd compile -u -p COM8 --build-property "compiler.cpp.extra_flags=-DBADGE_RADIO_ON_BOOT=0" --fqbn <same> remote/badge_controller
+  python (pyserial 115200 on COM8, one owner at a time: 'w' then 'p' then 'f')
+DEVICE  : 2026 Hacker Badge, ESP32-C3-MINI-1, USB-Serial-JTAG (VID_303A PID_1001) on COM8, through a dongle
+CAPTURED: 2026-09-20T07:16:50-04:00
+
+----------------------------------------------------------------------------------------------------
+WHAT THE BADGE ITSELF SAID
+----------------------------------------------------------------------------------------------------
+
+1. THE FLASH WORKS, WITHOUT DOWNLOAD MODE
+
+    Wrote 743856 bytes (452426 compressed) at 0x00010000 in 2.5 seconds (effective 2337.5 kbit/s)...
+    Hash of data verified.
+
+   The ROM bootloader accepted and verified the image. No Start-button hold was needed for any of the
+   four flashes in this session; the guide's download-mode step is for boards whose USB does not reset
+   the chip, and this one does.
+
+2. THE FIRST FIRMWARE RESET-LOOPED AT RADIO START
+
+   Nineteen boots in thirty seconds, each one ending in the same place (captured verbatim, one boot):
+
+    badge rc controller: 4 buttons -> ESP-NOW -> car
+    reset reason: BROWNOUT (supply dipped) (9)
+    [i2c] SC7A20 ok, -1 168 1028 mg (WHO_AM_I 0x11)
+    [espnow] starting radio...
+
+   The reset reason is the chip's own register, read on the next boot: BROWNOUT on every alternating
+   cycle, POWERON (1) on the others - the rail collapsed hard enough that some resets looked like a
+   power cycle. Adding that one line to setup() is what turned "it keeps restarting" into a fact.
+
+3. WHAT DID SURVIVE, ON THE SAME DONGLE
+
+   With the radio skipped at boot (BADGE_RADIO_ON_BOOT=0), the badge is stable and everything except
+   the link works - this is one session, verbatim:
+
+    [state] cmd=STOP inject=no buttons=AUX1
+    [state] radio=DOWN car=none age=0ms rx=0 tx=0 fails=0 carcmd=0,0 flags=0x00 seq=0 uptime=0s
+    [inject] FWD
+    [cmd] FWD (buttons AUX1)
+    [state] cmd=FWD inject=FWD buttons=AUX1
+    [inject] STOP
+    [cmd] STOP (buttons AUX1)
+    [inject] cleared
+
+   So on real hardware: the 74HC165 read works (and AUX1 reads pressed, which is the guide's "Aux1 is
+   a maintained side switch, not momentary - don't assume it boots released"), the debounce and the
+   console both work, the maneuver state machine works, and the panel/LED draw paths run without
+   faulting. And the radio can be started on demand:
+
+    [espnow] starting radio...
+    [espnow] max tx power set to 8 (2.0 dBm)
+    [espnow] channel 1, pair key 0x5A17BAD6, badge mac 28:84:85:EA:C9:BC
+    [state] cmd=STOP inject=no buttons=AUX1
+    [state] radio=up car=none age=0ms rx=0 tx=0 fails=0 carcmd=0,0 flags=0x00 seq=0 uptime=0s
+
+   The radio initialises, reports up, and the badge survives it. What it does NOT survive is
+   transmitting: injecting a direction (the 20 Hz stream) dropped the device within a few seconds, and
+   so did the retry at 5 Hz with the TX power already at the API floor:
+
+    [inject] FWD
+    [cmd] FWD (buttons AUX1)
+    <device gone: ClearCommError, then the port disappears and it boots again>
+
+4. WHY SOFTWARE CANNOT FIX THIS ONE
+
+   Transmit power is already at the bottom of the range the API accepts (2 dBm - 8 in 0.25 dBm units),
+   the packet rate is a fifth of the car's deadman requirement, the CPU runs at 80 MHz and the panel
+   refreshes at 4 Hz. The remaining current is the receiver, and the SDK is explicit about it:
+
+     esp_now.h:  "If never configured wake_window, the chip would keep waked at disconnected once it
+                  uses esp_now"                                        (attention 5 to set_wake_window)
+     esp_now.h:  "Only when ESP_WIFI_STA_DISCONNECTED_PM_ENABLE is enabled, this configuration could
+                  work"                                                (attention 1)
+     sdkconfig (the ESP32-C3 libraries this core ships):
+                 "# CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE is not set"
+
+   So the wake window cannot be used in this build, and a disconnected ESP-NOW station stays awake:
+   roughly 100 mA of receiver on top of the panel, which is what this dongle's rail cannot carry. That
+   is a supply limit, not a software one. The two ways out are power (a port that can source ~500 mA
+   peaks, or charged AAs in the holder) or a lighter radio; the car already speaks BLE for the phone
+   app, which is the obvious second candidate, at the cost of a Bluedroid stack this board's heap may
+   not like (guide section 8).
+
+----------------------------------------------------------------------------------------------------
+THE CAR SIDE, ON THE SAME BENCH SESSION
+----------------------------------------------------------------------------------------------------
+CAR: Freenove ESP32-S3-WROOM CAM (OpenBot, DIY_ESP32 body), USB-UART bridge CH343 on COM4.
+
+  .tools\arduino.cmd compile -u -p COM4 --fqbn "esp32:esp32:esp32s3:PartitionScheme=huge_app" OpenBot/firmware/openbot
+
+1. THE FIRST CAR BUILD RESET-LOOPED, AND ITS OWN DRIVER SAID WHY
+
+    r
+    Waiting a client connection to notify...
+    E (824) wifi:Error! Should enable WiFi modem sleep when both WiFi and Bluetooth are enabled!!!!!!
+    abort() was called at PC 0x420bec47 on core 0
+    Backtrace: 0x403779c6:0x3fcb6730 0x4037fb71:0x3fcb6750 ...
+    Rebooting...
+
+   A real bug in the ESP-NOW addition, not a power problem: the car runs BLE for the phone app as well,
+   and esp_wifi_set_ps(WIFI_PS_NONE) - which the badge can afford, having no BLE - is forbidden when
+   both radios are enabled. The driver aborts inside esp_wifi_start(), so the car reset-looped and the
+   badge's link never came up. Fixed by setting modem sleep (WIFI_PS_MIN_MODEM) on the car only;
+   esp_now.h notes that with no wake window configured the station stays awake while ESP-NOW is in use,
+   so the receiver still hears the badge.
+
+2. AFTER THE FIX: CLEAN BOOT, BOTH RADIOS UP
+
+    Waiting a client connection to notify...
+    ESP-NOW ready: channel 1, pair key 0x5A17BAD6
+    ------------------
+    Voltage:    N/A
+    Left RPM:  N/A
+    Right RPM:  N/A
+    Distance:   N/A
+    ------------------
+
+   Over 16 seconds: 0 aborts, 0 reboots, the BLE advertising line still present (the phone path is
+   intact), and the once-a-second vehicle report running. Voltage/RPM/Distance are N/A because this
+   body has no sensors fitted - it is the sonar/encoder-free DIY_ESP32 build.
+
+   No badge was transmitting during the capture ("badge paired" never appeared): the badge was not on
+   USB, and the image it is holding is the dongle-safe one, which does not start the radio at boot.
+
+----------------------------------------------------------------------------------------------------
+WHAT IS STILL UNSEEN
+The panel's orientation and colours, and the LED strip's colours - neither can be read over USB. Both
+are one switch in badge_pins.h (PANEL_SWAP_XY / PANEL_MIRROR_X / PANEL_BGR) if they come up wrong.
