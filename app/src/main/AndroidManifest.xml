@@ -28,6 +28,8 @@
         tools:targetApi="s" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
+    <!-- Voice input, added with the voice assistant on main. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-feature
         android:name="android.hardware.camera.ar"
         android:required="true" />
@@ -44,10 +46,10 @@
         <meta-data
             android:name="com.google.ar.core"
             android:value="required" />
-        <!-- The Maps SDK key, injected from local.properties at build time. -->
+        <!-- The Maps SDK key, from local.properties via the secrets plugin. -->
         <meta-data
             android:name="com.google.android.geo.API_KEY"
-            android:value="${mapsApiKey}" />
+            android:value="${MAPS_API_KEY}" />
         <activity
             android:name=".MainActivity"
             android:exported="true"
