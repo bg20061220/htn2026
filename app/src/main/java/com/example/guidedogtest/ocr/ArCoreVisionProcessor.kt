@@ -43,9 +43,7 @@ class ArCoreVisionProcessor(
         if (!busy.compareAndSet(false, true)) return
         executor.execute {
             try {
-                if (depth == null) {
-                    onSceneAwareness(SceneAwarenessResult())
-                } else {
+                if (depth != null) {
                     sceneAwarenessAnalyzer.analyzeIfDue(depth)?.let(onSceneAwareness)
                 }
                 val bitmap = frame.toBitmap()

@@ -51,16 +51,22 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.guidedogtest.Drive
+import com.example.guidedogtest.voice.VoicePriority
 import kotlinx.coroutines.delay
 
 @Composable
 fun OcrScreen(
     onClose: () -> Unit,
     speakObstacleAlert: (String) -> Boolean = { false },
+    speakAvoidanceAlert: (String, VoicePriority) -> Boolean = { _, _ -> false },
     robotConnected: Boolean = false,
+    initialAutonomousEnabled: Boolean = false,
+    routeNavigationActive: Boolean = false,
+    desiredRouteDirection: DesiredTravelDirection = DesiredTravelDirection.FORWARD,
     emergencyStopSignal: Long = 0L,
     onAutonomousAvoidanceEnabled: (Boolean) -> Unit = {},
     onAutonomousFrame: (String?) -> Unit = {},
+    onAvoidanceDecision: (AvoidanceDecision) -> Unit = {},
 ) {
     val context = LocalContext.current
     DisposableEffect(context) {
@@ -110,10 +116,15 @@ fun OcrScreen(
             if (cameraPermissionGranted) {
                 OcrCameraContent(
                     speakObstacleAlert = speakObstacleAlert,
+                    speakAvoidanceAlert = speakAvoidanceAlert,
                     robotConnected = robotConnected,
+                    initialAutonomousEnabled = initialAutonomousEnabled,
+                    routeNavigationActive = routeNavigationActive,
+                    desiredRouteDirection = desiredRouteDirection,
                     emergencyStopSignal = emergencyStopSignal,
                     onAutonomousAvoidanceEnabled = onAutonomousAvoidanceEnabled,
                     onAutonomousFrame = onAutonomousFrame,
+                    onAvoidanceDecision = onAvoidanceDecision,
                     modifier = Modifier.weight(1f)
                 )
             } else {
@@ -140,26 +151,36 @@ fun OcrScreen(
 @Composable
 private fun OcrCameraContent(
     speakObstacleAlert: (String) -> Boolean,
+    speakAvoidanceAlert: (String, VoicePriority) -> Boolean,
     robotConnected: Boolean,
+    initialAutonomousEnabled: Boolean,
+    routeNavigationActive: Boolean,
+    desiredRouteDirection: DesiredTravelDirection,
     emergencyStopSignal: Long,
     onAutonomousAvoidanceEnabled: (Boolean) -> Unit,
     onAutonomousFrame: (String?) -> Unit,
+    onAvoidanceDecision: (AvoidanceDecision) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var frameResult by remember { mutableStateOf(OcrFrameResult()) }
     var objectDetections by remember { mutableStateOf<List<VisionObjectDetection>>(emptyList()) }
     var cameraError by remember { mutableStateOf<String?>(null) }
     var depthStatus by remember { mutableStateOf(ArDepthStatus()) }
-    var autonomousEnabled by remember { mutableStateOf(false) }
+    var autonomousEnabled by remember { mutableStateOf(initialAutonomousEnabled) }
     var avoidanceDecision by remember { mutableStateOf(AvoidanceDecision(AvoidanceState.IDLE, com.example.guidedogtest.WheelSpeeds(0, 0), "AUTO OFF")) }
     var obstacleAlertsEnabled by remember { mutableStateOf(false) }
     var warningDistanceMeters by remember { mutableStateOf(2f) }
     var lastObstacleAlert by remember { mutableStateOf<String?>(null) }
-    var sceneAwareness by remember { mutableStateOf<SceneAwarenessResult?>(null) }
+    var rawSceneAwareness by remember { mutableStateOf<SceneAwarenessResult?>(null) }
+    val visualizationStabilizer = remember { DepthVisualizationStabilizer() }
+    var depthVisualization by remember {
+        mutableStateOf(DepthVisualization(DepthVisualizationStabilizer.unknownScene(), DepthVisualState.STALE))
+    }
     val obstacleAlertManager = remember {
         ObstacleAlertManager(speak = speakObstacleAlert)
     }
     val avoidanceController = remember { ObstacleAvoidanceController() }
+    val avoidanceSpeechManager = remember { AvoidanceSpeechManager(speak = speakAvoidanceAlert) }
 
     LaunchedEffect(emergencyStopSignal) {
         if (emergencyStopSignal > 0L) {
@@ -174,15 +195,30 @@ private fun OcrCameraContent(
         }
     }
 
-    fun applyAvoidance(scene: SceneAwarenessResult? = sceneAwareness) {
+    fun applyAvoidance(scene: SceneAwarenessResult? = rawSceneAwareness) {
         avoidanceDecision = avoidanceController.update(
             scene = scene,
             enabled = autonomousEnabled,
             cameraAvailable = depthStatus.sessionActive,
             depthAvailable = depthStatus.depthActive,
             robotConnected = robotConnected,
+            desiredDirection = desiredRouteDirection,
         )
         onAutonomousFrame(if (autonomousEnabled) avoidanceDecision.wheelSpeeds.frame() else null)
+        onAvoidanceDecision(avoidanceDecision)
+        if (autonomousEnabled) avoidanceSpeechManager.consider(avoidanceDecision, scene)
+    }
+
+    LaunchedEffect(initialAutonomousEnabled, routeNavigationActive) {
+        if (initialAutonomousEnabled || routeNavigationActive) {
+            autonomousEnabled = true
+            onAutonomousAvoidanceEnabled(true)
+            applyAvoidance()
+        }
+    }
+
+    LaunchedEffect(desiredRouteDirection) {
+        if (autonomousEnabled) applyAvoidance()
     }
 
     LaunchedEffect(autonomousEnabled, robotConnected, depthStatus.sessionActive, depthStatus.depthActive) {
@@ -195,7 +231,21 @@ private fun OcrCameraContent(
             )?.let {
                 avoidanceDecision = it
                 onAutonomousFrame(it.wheelSpeeds.frame())
+                onAvoidanceDecision(it)
+                avoidanceSpeechManager.consider(it, rawSceneAwareness)
             }
+            delay(100L)
+        }
+    }
+
+    // UI persistence is separate from the raw scene used by the safety controller above.
+    LaunchedEffect(Unit) {
+        while (true) {
+            depthVisualization = visualizationStabilizer.current(
+                depthSupported = depthStatus.message?.contains("not supported", ignoreCase = true) != true,
+                sessionActive = depthStatus.sessionActive,
+                freshDepthAvailable = depthStatus.depthActive,
+            )
             delay(100L)
         }
     }
@@ -217,15 +267,21 @@ private fun OcrCameraContent(
         ArCoreDepthPreview(
                 frameResult = frameResult,
                 objectDetections = objectDetections,
-                sceneAwareness = sceneAwareness,
+                sceneAwareness = depthVisualization.scene,
                 onResult = { frameResult = it; cameraError = null },
                 onObjectDetections = { objectDetections = it; cameraError = null },
                 onSceneAwareness = {
-                    sceneAwareness = it
+                    rawSceneAwareness = it
+                    depthVisualization = visualizationStabilizer.accept(it)
                     applyAvoidance(it)
                 },
                 onStatus = {
                     depthStatus = it
+                    depthVisualization = visualizationStabilizer.current(
+                        depthSupported = it.message?.contains("not supported", ignoreCase = true) != true,
+                        sessionActive = it.sessionActive,
+                        freshDepthAvailable = it.depthActive,
+                    )
                     if (autonomousEnabled && (!it.sessionActive || !it.depthActive)) {
                         applyAvoidance()
                     }
@@ -283,8 +339,14 @@ private fun OcrCameraContent(
             color = MaterialTheme.colorScheme.onSurface,
             style = MaterialTheme.typography.bodySmall
         )
+        Text(
+            text = "Depth: ${depthVisualization.state}",
+            color = if (depthVisualization.state == DepthVisualState.ACTIVE) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.labelSmall
+        )
         depthStatus.message?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-        SceneAwarenessPanel(sceneAwareness)
+        SceneAwarenessPanel(depthVisualization.scene)
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -293,10 +355,12 @@ private fun OcrCameraContent(
             Text("AUTONOMOUS AVOIDANCE: ${if (autonomousEnabled) "ON" else "OFF"}")
             Switch(
                 checked = autonomousEnabled,
+                enabled = !routeNavigationActive,
                 onCheckedChange = { enabled ->
                     autonomousEnabled = enabled
                     onAutonomousAvoidanceEnabled(enabled)
                     if (!enabled) {
+                        avoidanceSpeechManager.reset()
                         avoidanceDecision = AvoidanceDecision(AvoidanceState.IDLE, com.example.guidedogtest.WheelSpeeds(0, 0), "AUTO OFF")
                         onAutonomousFrame(null)
                     } else {
@@ -306,6 +370,11 @@ private fun OcrCameraContent(
             )
         }
         Text("AUTO: ${if (autonomousEnabled) "ON" else "OFF"} • Action: ${avoidanceDecision.action}")
+        Text("NAVIGATION: ${if (routeNavigationActive) "ACTIVE" else "INACTIVE"}", style = MaterialTheme.typography.labelSmall)
+        Text("Desired route direction: $desiredRouteDirection", style = MaterialTheme.typography.labelSmall)
+        Text("Local action: ${avoidanceDecision.action}", style = MaterialTheme.typography.labelSmall)
+        Text("Target corridor: ${avoidanceDecision.targetCorridorOffset?.let { String.format(java.util.Locale.US, "%+.2f", it) } ?: "--"}", style = MaterialTheme.typography.labelSmall)
+        Text("Motor output: L: ${avoidanceDecision.wheelSpeeds.left}  R: ${avoidanceDecision.wheelSpeeds.right}", style = MaterialTheme.typography.labelSmall)
         Button(onClick = {
             autonomousEnabled = false
             onAutonomousAvoidanceEnabled(false)
@@ -373,14 +442,19 @@ private fun ArCoreDepthPreview(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val mainExecutor = remember(context) { ContextCompat.getMainExecutor(context) }
+    val currentOnResult by androidx.compose.runtime.rememberUpdatedState(onResult)
+    val currentOnObjects by androidx.compose.runtime.rememberUpdatedState(onObjectDetections)
+    val currentOnScene by androidx.compose.runtime.rememberUpdatedState(onSceneAwareness)
+    val currentOnStatus by androidx.compose.runtime.rememberUpdatedState(onStatus)
+    val currentOnError by androidx.compose.runtime.rememberUpdatedState(onError)
     val view = remember {
         ArCoreDepthCameraView(
             context,
-            onText = { mainExecutor.execute { onResult(it) } },
-            onObjects = { mainExecutor.execute { onObjectDetections(it) } },
-            onSceneAwareness = { mainExecutor.execute { onSceneAwareness(it) } },
-            onStatus = { mainExecutor.execute { onStatus(it) } },
-            onError = { mainExecutor.execute { onError(it) } }
+            onText = { result -> mainExecutor.execute { currentOnResult(result) } },
+            onObjects = { objects -> mainExecutor.execute { currentOnObjects(objects) } },
+            onSceneAwareness = { scene -> mainExecutor.execute { currentOnScene(scene) } },
+            onStatus = { status -> mainExecutor.execute { currentOnStatus(status) } },
+            onError = { error -> mainExecutor.execute { currentOnError(error) } }
         )
     }
     DisposableEffect(lifecycleOwner, view) {
@@ -407,14 +481,16 @@ private fun ArCoreDepthPreview(
 
 @Composable
 private fun SceneAwarenessPanel(result: SceneAwarenessResult?) {
-    fun line(label: String, distance: Float?, state: SceneZoneState): String =
-        "$label: ${distance?.let { String.format(java.util.Locale.US, "%.1f m", it) } ?: "--"} $state"
     val value = result ?: SceneAwarenessResult()
     Text(
         text = buildString {
-            appendLine(line("LEFT", value.leftDistanceMeters, value.leftState))
-            appendLine(line("CENTER", value.centerDistanceMeters, value.centerState))
-            appendLine(line("RIGHT", value.rightDistanceMeters, value.rightState))
+            appendLine("Support: ${if (value.supportPlaneDetected) "TRACKED" else "UNKNOWN"}")
+            appendLine("Drop: ${if (value.dropDetected) "DETECTED" else "none"}")
+            val corridor = value.freeCorridor
+            appendLine(if (corridor == null) "Free corridor: NONE" else {
+                val side = when { corridor.centerOffset < -0.12f -> "LEFT"; corridor.centerOffset > 0.12f -> "RIGHT"; else -> "CENTER" }
+                "Free corridor: $side (${corridor.widthColumns} columns)"
+            })
             append("Recommendation: ${value.recommendedDirection}")
         },
         modifier = Modifier
@@ -431,11 +507,6 @@ private fun SceneZoneOverlay(
     sceneAwareness: SceneAwarenessResult?,
     modifier: Modifier = Modifier
 ) {
-    val states = listOf(
-        sceneAwareness?.leftState ?: SceneZoneState.UNKNOWN,
-        sceneAwareness?.centerState ?: SceneZoneState.UNKNOWN,
-        sceneAwareness?.rightState ?: SceneZoneState.UNKNOWN
-    )
     val clearColor = Color(0xFF2E7D32)
     val cautionColor = Color(0xFFF9A825)
     val blockedColor = Color(0xFFC62828)
@@ -445,26 +516,37 @@ private fun SceneZoneOverlay(
         val top = size.height * SceneAwarenessAnalyzer.REGION_TOP
         val regionWidth = size.width *
             (SceneAwarenessAnalyzer.REGION_RIGHT - SceneAwarenessAnalyzer.REGION_LEFT)
-        val zoneWidth = regionWidth / 3f
+        val columns = sceneAwareness?.gridColumns ?: SceneAwarenessAnalyzer.GRID_COLUMNS
+        val rows = sceneAwareness?.gridRows ?: SceneAwarenessAnalyzer.GRID_ROWS
+        val cellWidth = regionWidth / columns
         val regionHeight = size.height *
             (SceneAwarenessAnalyzer.REGION_BOTTOM - SceneAwarenessAnalyzer.REGION_TOP)
-        states.forEachIndexed { index, state ->
-            val color = when (state) {
-                SceneZoneState.CLEAR -> clearColor
-                SceneZoneState.CAUTION -> cautionColor
-                SceneZoneState.BLOCKED -> blockedColor
-                SceneZoneState.UNKNOWN -> unknownColor
+        val cellHeight = regionHeight / rows
+        val cells = sceneAwareness?.cells.orEmpty()
+        cells.forEach { cell ->
+            val color = when (cell.state) {
+                OccupancyState.FREE -> clearColor
+                OccupancyState.CAUTION -> cautionColor
+                OccupancyState.OCCUPIED, OccupancyState.DROP -> blockedColor
+                OccupancyState.UNKNOWN -> unknownColor
             }
             drawRect(
-                color = color.copy(alpha = 0.16f),
-                topLeft = Offset(left + index * zoneWidth, top),
-                size = Size(zoneWidth, regionHeight)
+                color = color.copy(alpha = 0.12f),
+                topLeft = Offset(left + cell.column * cellWidth, top + cell.row * cellHeight),
+                size = Size(cellWidth, cellHeight)
             )
             drawRect(
                 color = color.copy(alpha = 0.75f),
-                topLeft = Offset(left + index * zoneWidth, top),
-                size = Size(zoneWidth, regionHeight),
+                topLeft = Offset(left + cell.column * cellWidth, top + cell.row * cellHeight),
+                size = Size(cellWidth, cellHeight),
                 style = Stroke(width = 1.dp.toPx())
+            )
+        }
+        sceneAwareness?.freeCorridor?.let { corridor ->
+            drawRect(
+                color = clearColor.copy(alpha = 0.9f),
+                topLeft = Offset(left + corridor.startColumn * cellWidth, top),
+                size = Size(corridor.widthColumns * cellWidth, 4.dp.toPx()),
             )
         }
     }

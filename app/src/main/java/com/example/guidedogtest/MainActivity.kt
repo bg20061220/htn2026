@@ -25,15 +25,19 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import com.example.guidedogtest.ocr.OcrScreen
+import com.example.guidedogtest.ocr.DesiredTravelDirection
+import com.example.guidedogtest.ocr.AvoidanceState
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
@@ -72,6 +76,7 @@ import com.google.maps.android.compose.Marker
 import com.google.maps.android.compose.Polyline
 import com.google.maps.android.compose.rememberCameraPositionState
 import com.google.maps.android.compose.rememberUpdatedMarkerState
+import com.google.maps.android.compose.CameraPositionState
 import com.google.android.gms.maps.model.BitmapDescriptor
 import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import java.io.IOException
@@ -125,6 +130,7 @@ fun NavigationScreen() {
     var placeSuggestions by remember { mutableStateOf<List<AutocompletePrediction>>(emptyList()) }
     var autocompleteToken by remember { mutableStateOf<AutocompleteSessionToken?>(null) }
     var destinationSearchError by remember { mutableStateOf<String?>(null) }
+    var autocompleteLoading by remember { mutableStateOf(false) }
     var routePoints by remember { mutableStateOf<List<LatLng>>(emptyList()) }
     var routeDistance by remember { mutableStateOf<String?>(null) }
     var routeDuration by remember { mutableStateOf<String?>(null) }
@@ -167,22 +173,49 @@ fun NavigationScreen() {
     var avoidanceActive by remember { mutableStateOf(false) }
     var avoidanceFrame by remember { mutableStateOf(Drive.STOP_FRAME) }
     var emergencyStopSignal by remember { mutableStateOf(0L) }
-
-    val scope = rememberCoroutineScope()
+    var desiredRouteDirection by remember { mutableStateOf(DesiredTravelDirection.STOP) }
+    var localAvoidanceState by remember { mutableStateOf(AvoidanceState.STOPPED) }
 
     val scrollState = rememberScrollState()
 
     /** True while the destination field has the keyboard, so a resize can bring it back into view. */
     var destinationFocused by remember { mutableStateOf(false) }
+    val destinationFocusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
 
-    /** Brings the destination field and the buttons under it above the keyboard. */
-    fun revealBottom() {
-        scope.launch { scrollState.scrollTo(scrollState.maxValue) }
+    fun selectPrediction(prediction: AutocompletePrediction) {
+        val request = FetchPlaceRequest.builder(
+            prediction.placeId,
+            listOf(Place.Field.DISPLAY_NAME, Place.Field.LOCATION),
+        ).apply { autocompleteToken?.let { setSessionToken(it) } }.build()
+        placesClient.fetchPlace(request)
+            .addOnSuccessListener { response ->
+                response.place.location?.let { location ->
+                    val name = response.place.displayName
+                        ?: prediction.getPrimaryText(null).toString()
+                    destination = name
+                    destinationName = name
+                    destinationLocation = location
+                    routePoints = emptyList()
+                    routeDistance = null
+                    routeDuration = null
+                    routeInstructions = emptyList()
+                    routeMessage = null
+                    placeSuggestions = emptyList()
+                    destinationSearchError = null
+                    autocompleteToken = null
+                    destinationFocused = false
+                }
+            }
+            .addOnFailureListener {
+                destinationSearchError = "Unable to load the selected place"
+            }
     }
 
     fun stopFollowing() {
         following = false
         autonomousFrame = null
+        desiredRouteDirection = DesiredTravelDirection.STOP
     }
 
     /**
@@ -200,6 +233,13 @@ fun NavigationScreen() {
         emergencyStopSignal++
         link.send(Drive.STOP_FRAME)
         if (sayIt) pendingAnnouncement = "Stopping."
+    }
+
+    fun manualDrive(next: String) {
+        stopFollowing()
+        avoidanceActive = false
+        avoidanceFrame = Drive.STOP_FRAME
+        command = next
     }
 
     /**
@@ -263,6 +303,9 @@ fun NavigationScreen() {
                                 if (follower != null && link.connected) {
                                     command = "STOP"
                                     autonomousFrame = Drive.STOP_FRAME
+                                    desiredRouteDirection = DesiredTravelDirection.STOP
+                                    avoidanceActive = true
+                                    showCameraView = true
                                     following = true
                                 } else {
                                     // The assistant has already said "Okay, going." by now, so an
@@ -422,10 +465,12 @@ fun NavigationScreen() {
         if (query.length < 2 || query == destinationName) {
             placeSuggestions = emptyList()
             destinationSearchError = null
+            autocompleteLoading = false
             return@LaunchedEffect
         }
 
         delay(300)
+        autocompleteLoading = true
         val token = autocompleteToken ?: AutocompleteSessionToken.newInstance().also {
             autocompleteToken = it
         }
@@ -450,12 +495,14 @@ fun NavigationScreen() {
                 if (destination.trim() == query) {
                     placeSuggestions = response.autocompletePredictions
                     destinationSearchError = null
+                    autocompleteLoading = false
                 }
             }
             .addOnFailureListener {
                 if (destination.trim() == query) {
                     placeSuggestions = emptyList()
                     destinationSearchError = "Unable to load place suggestions"
+                    autocompleteLoading = false
                 }
             }
     }
@@ -636,6 +683,7 @@ fun NavigationScreen() {
             val location = lastLocation
 
             if (location == null) {
+                desiredRouteDirection = DesiredTravelDirection.STOP
                 autonomousFrame = Drive.STOP_FRAME
                 routeStatus = "waiting for a GPS fix"
             } else {
@@ -649,28 +697,44 @@ fun NavigationScreen() {
                         headingDegrees = headingSource.headingDegrees ?: gpsCourse(location),
                     )
 
-                when (val decision = active.update(fix, FOLLOW_TICK_MS / 1000.0)) {
+                val progressDt = if (localAvoidanceState == AvoidanceState.FORWARD ||
+                    localAvoidanceState == AvoidanceState.SLOW) FOLLOW_TICK_MS / 1000.0 else 0.0
+                when (val decision = active.update(fix, progressDt)) {
 
                     is Command.Pivot -> {
-                        // Closed loop, so the frame is re-sent every tick until the error closes.
-                        autonomousFrame = Drive.frame(decision.left, decision.right)
+                        desiredRouteDirection = if (decision.degrees < 0) {
+                            DesiredTravelDirection.PIVOT_LEFT
+                        } else {
+                            DesiredTravelDirection.PIVOT_RIGHT
+                        }
+                        autonomousFrame = Drive.STOP_FRAME
                         routeStatus =
                             "turning ${if (decision.degrees < 0) "left" else "right"} " +
                                 "${abs(decision.degrees).toInt()}°"
                     }
 
                     is Command.Drive -> {
-                        autonomousFrame = Drive.frame(decision.left, decision.right)
+                        val routeHeadingError = active.currentStep?.let { step ->
+                            active.bearingErrorDegrees(fix, GeoPoint(step.endLat, step.endLng))
+                        } ?: 0.0
+                        desiredRouteDirection = when {
+                            routeHeadingError > ROUTE_DIRECTION_ERROR_DEGREES -> DesiredTravelDirection.RIGHT
+                            routeHeadingError < -ROUTE_DIRECTION_ERROR_DEGREES -> DesiredTravelDirection.LEFT
+                            else -> DesiredTravelDirection.FORWARD
+                        }
+                        autonomousFrame = Drive.STOP_FRAME
                         routeStatus =
                             "${active.progressLabel()}: ${active.currentStep?.instruction ?: ""}"
                     }
 
                     is Command.Hold -> {
+                        desiredRouteDirection = DesiredTravelDirection.STOP
                         autonomousFrame = Drive.STOP_FRAME
                         routeStatus = decision.reason
                     }
 
                     Command.Arrived -> {
+                        desiredRouteDirection = DesiredTravelDirection.STOP
                         autonomousFrame = Drive.STOP_FRAME
                         routeStatus = "arrived"
                         following = false
@@ -682,6 +746,7 @@ fun NavigationScreen() {
         }
 
         autonomousFrame = Drive.STOP_FRAME
+        desiredRouteDirection = DesiredTravelDirection.STOP
     }
 
     // Leaving the screen must never leave the car rolling.
@@ -716,20 +781,39 @@ fun NavigationScreen() {
         return
     }
 
-    // Scrollable: the route status and the manual buttons below it overflow an S21 screen once a
-    // route is loaded, and a STOP that cannot be reached is worse than useless. The size callback is
-    // what lifts the destination field above the keyboard: the window shrinks when the keyboard
-    // opens, and that resize is the reliable moment to scroll, not the focus event.
-    Column(
+    // The S21 is mounted in landscape with a physical brace across its center. Keep the visual map
+    // on the left and every important touch target in a dedicated rail at the far right.
+    Row(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(scrollState)
-            .onSizeChanged { if (destinationFocused) revealBottom() }
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .padding(12.dp),
     ) {
-
         val routePolylineColor = MaterialTheme.colorScheme.primary
+
+        RobotMapPane(
+            modifier = Modifier
+                .weight(1.7f)
+                .fillMaxHeight(),
+            context = context,
+            cameraPositionState = cameraPositionState,
+            currentLocation = currentLocation,
+            lastLocation = lastLocation,
+            robotHeading = headingSource.headingDegrees,
+            destinationLocation = destinationLocation,
+            destinationName = destinationName,
+            routePoints = routePoints,
+            routePolylineColor = routePolylineColor,
+        )
+
+        Spacer(modifier = Modifier.width(14.dp))
+
+        Column(
+            modifier = Modifier
+                .widthIn(min = 310.dp, max = 390.dp)
+                .fillMaxHeight()
+                .verticalScroll(scrollState),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
 
         Text(
             text = "MyPetGoose",
@@ -846,6 +930,28 @@ fun NavigationScreen() {
             Text("CAMERA VIEW")
         }
 
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text("AUTO AVOIDANCE")
+            Switch(
+                checked = avoidanceActive,
+                onCheckedChange = { enabled ->
+                    if (enabled) {
+                        stopFollowing()
+                        command = "STOP"
+                        avoidanceFrame = Drive.STOP_FRAME
+                        avoidanceActive = true
+                        showCameraView = true
+                    } else {
+                        halt(sayIt = false)
+                    }
+                },
+            )
+        }
+
         Spacer(modifier = Modifier.height(24.dp))
 
         Text(
@@ -892,163 +998,101 @@ fun NavigationScreen() {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // One map for the whole app: the route line and the chosen places, plus the robot itself -
-        // an arrow rotated to its heading and a ring showing how good the fix is.
-        var robotArrow by remember { mutableStateOf<BitmapDescriptor?>(null) }
-
-        GoogleMap(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(280.dp),
-            cameraPositionState = cameraPositionState
-        ) {
-            // The SDK is only ready once the map exists, and BitmapDescriptorFactory throws before
-            // that - which is why the arrow is built here rather than during composition.
-            MapEffect(Unit) { robotArrow = headingArrowIcon(context) }
-
-            currentLocation?.let { location ->
-                Marker(
-                    state = rememberUpdatedMarkerState(position = location),
-                    title = "Current Location",
-                    icon = robotArrow ?: BitmapDescriptorFactory.defaultMarker(),
-                    rotation = (headingSource.headingDegrees ?: 0.0).toFloat(),
-                    flat = true,
-                    anchor = Offset(0.5f, 0.5f),
-                )
-                lastLocation?.let { fix ->
-                    Circle(
-                        center = location,
-                        radius = fix.accuracy.toDouble(),
-                        fillColor = Color(0x221B5E20),
-                        strokeColor = Color(0x661B5E20),
-                        strokeWidth = 2f,
-                    )
-                }
-            }
-            destinationLocation?.let { location ->
-                Marker(
-                    state = rememberUpdatedMarkerState(position = location),
-                    title = destinationName ?: "Destination"
-                )
-            }
-            if (routePoints.isNotEmpty()) {
-                Polyline(
-                    points = routePoints,
-                    color = routePolylineColor,
-                    width = 12f
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(20.dp))
-
-        OutlinedTextField(
-            value = destination,
-            onValueChange = { value ->
-                destination = value
-                if (value != destinationName) {
-                    destinationName = null
-                    destinationLocation = null
-                    routePoints = emptyList()
-                    routeDistance = null
-                    routeDuration = null
-                    routeInstructions = emptyList()
-                    routeMessage = null
-                }
-            },
-            label = { Text("Destination") },
-            placeholder = { Text("Search for a destination") },
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedTextColor = MaterialTheme.colorScheme.onSurface,
-                unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
-                disabledTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
-                cursorColor = MaterialTheme.colorScheme.primary,
-                focusedContainerColor = MaterialTheme.colorScheme.surface,
-                unfocusedContainerColor = MaterialTheme.colorScheme.surface,
-                disabledContainerColor = MaterialTheme.colorScheme.surface,
-                focusedLabelColor = MaterialTheme.colorScheme.primary,
-                unfocusedLabelColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                disabledLabelColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
-                focusedPlaceholderColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                unfocusedPlaceholderColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                disabledPlaceholderColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
-                focusedBorderColor = MaterialTheme.colorScheme.primary,
-                unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-                disabledBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.38f)
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .onFocusChanged { focus ->
-                    destinationFocused = focus.isFocused
-                    if (focus.isFocused) revealBottom()
+        Box(modifier = Modifier.fillMaxWidth()) {
+            OutlinedTextField(
+                value = destination,
+                onValueChange = { value ->
+                    destination = value
+                    destinationFocused = true
+                    if (value != destinationName) {
+                        destinationName = null
+                        destinationLocation = null
+                        routePoints = emptyList()
+                        routeDistance = null
+                        routeDuration = null
+                        routeInstructions = emptyList()
+                        routeMessage = null
+                    }
                 },
-        )
-
-        placeSuggestions.forEach { prediction ->
-            Surface(
+                label = { Text("Destination") },
+                placeholder = { Text("Search places or addresses") },
+                trailingIcon = if (destination.isNotEmpty()) {
+                    {
+                        IconButton(onClick = {
+                            destination = ""
+                            destinationName = null
+                            destinationLocation = null
+                            placeSuggestions = emptyList()
+                            destinationSearchError = null
+                            autocompleteLoading = false
+                            autocompleteToken = null
+                            routePoints = emptyList()
+                            routeDistance = null
+                            routeDuration = null
+                            routeInstructions = emptyList()
+                            routeMessage = null
+                            routeSteps = emptyList()
+                            follower = null
+                            following = false
+                            autonomousFrame = null
+                            desiredRouteDirection = DesiredTravelDirection.STOP
+                            avoidanceActive = false
+                            avoidanceFrame = Drive.STOP_FRAME
+                            command = "STOP"
+                            link.send(Drive.STOP_FRAME)
+                            destinationFocused = true
+                            destinationFocusRequester.requestFocus()
+                            keyboardController?.show()
+                        }) { Text("X", style = MaterialTheme.typography.titleMedium) }
+                    }
+                } else null,
+                singleLine = true,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = MaterialTheme.colorScheme.surface,
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                ),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable {
-                        val token = autocompleteToken
-                        val request = FetchPlaceRequest.builder(
-                            prediction.placeId,
-                            listOf(Place.Field.DISPLAY_NAME, Place.Field.LOCATION)
-                        ).apply {
-                            token?.let { setSessionToken(it) }
-                        }.build()
+                    .focusRequester(destinationFocusRequester)
+                    .onFocusChanged { destinationFocused = it.isFocused },
+            )
 
-                        placesClient.fetchPlace(request)
-                            .addOnSuccessListener { response ->
-                                val place = response.place
-                                val location = place.location
-                                if (location != null) {
-                                    val name = place.displayName
-                                        ?: prediction.getPrimaryText(null).toString()
-                                    destination = name
-                                    destinationName = name
-                                    destinationLocation = location
-                                    routePoints = emptyList()
-                                    routeDistance = null
-                                    routeDuration = null
-                                    routeInstructions = emptyList()
-                                    routeMessage = null
-                                    placeSuggestions = emptyList()
-                                    destinationSearchError = null
-                                    autocompleteToken = null
-                                }
-                            }
-                            .addOnFailureListener {
-                                destinationSearchError = "Unable to load the selected place"
-                            }
-                    },
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                tonalElevation = 2.dp
+            DropdownMenu(
+                expanded = destinationFocused && destination.trim().length >= 2 && destination != destinationName,
+                onDismissRequest = { destinationFocused = false },
+                modifier = Modifier.widthIn(min = 300.dp, max = 380.dp),
             ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Text(
-                        text = prediction.getPrimaryText(null).toString(),
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurface
+                when {
+                    autocompleteLoading -> DropdownMenuItem(
+                        text = { Text("Searching Google Places…") },
+                        onClick = {},
+                        enabled = false,
                     )
-                    val secondaryText = prediction.getSecondaryText(null).toString()
-                    if (secondaryText.isNotBlank()) {
-                        Text(
-                            text = secondaryText,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                    destinationSearchError != null -> DropdownMenuItem(
+                        text = { Text(destinationSearchError ?: "Unable to load suggestions") },
+                        onClick = {},
+                        enabled = false,
+                    )
+                    placeSuggestions.isEmpty() -> DropdownMenuItem(
+                        text = { Text("No matching places found") },
+                        onClick = {},
+                        enabled = false,
+                    )
+                    else -> placeSuggestions.take(6).forEach { prediction ->
+                        DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text(prediction.getPrimaryText(null).toString())
+                                    prediction.getSecondaryText(null).toString()
+                                        .takeIf { it.isNotBlank() }
+                                        ?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                                }
+                            },
+                            onClick = { selectPrediction(prediction) },
                         )
                     }
                 }
             }
-        }
-
-        destinationSearchError?.let { error ->
-            Text(
-                text = error,
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodySmall
-            )
         }
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -1193,8 +1237,10 @@ fun NavigationScreen() {
 
                 // Hand the motors over to the follower; the manual command goes neutral.
                 command = "STOP"
-                avoidanceActive = false
+                avoidanceActive = true
                 autonomousFrame = Drive.STOP_FRAME
+                desiredRouteDirection = DesiredTravelDirection.STOP
+                showCameraView = true
                 following = true
             },
             modifier = Modifier.fillMaxWidth()
@@ -1208,6 +1254,16 @@ fun NavigationScreen() {
 
         Spacer(modifier = Modifier.height(16.dp))
 
+        // Directional driving is intentionally kept off the home screen. STOP remains prominent
+        // because it overrides route following, avoidance, and any latched movement command.
+        Button(
+            onClick = { halt(sayIt = false) },
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+            modifier = Modifier.fillMaxWidth().heightIn(min = 68.dp),
+        ) { Text("EMERGENCY STOP") }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
         // The manual drive buttons and their wheel values live on their own page: they are the
         // floor-testing rig, not part of the demo flow.
         Button(
@@ -1216,6 +1272,11 @@ fun NavigationScreen() {
         ) {
             Text("CONFIGURE ROBOT")
         }
+        }
+    }
+
+    LaunchedEffect(emergencyStopSignal) {
+        if (emergencyStopSignal > 0L) conversationManager.announceEmergencyStop()
     }
 
     fun closeCameraView() {
@@ -1235,26 +1296,83 @@ fun NavigationScreen() {
             OcrScreen(
                 onClose = { closeCameraView() },
                 speakObstacleAlert = conversationManager::speakObstacleAlert,
+                speakAvoidanceAlert = conversationManager::speakAvoidanceAlert,
                 robotConnected = link.connected,
+                initialAutonomousEnabled = avoidanceActive,
+                routeNavigationActive = following,
+                desiredRouteDirection = desiredRouteDirection,
                 emergencyStopSignal = emergencyStopSignal,
                 onAutonomousAvoidanceEnabled = { enabled ->
                     avoidanceActive = enabled
                     avoidanceFrame = Drive.STOP_FRAME
                     if (enabled) {
+                        command = "STOP"
+                    } else if (following) {
                         stopFollowing()
                         command = "STOP"
+                        autonomousFrame = Drive.STOP_FRAME
+                        link.send(Drive.STOP_FRAME)
                     }
                 },
                 onAutonomousFrame = { frame ->
                     avoidanceFrame = frame ?: Drive.STOP_FRAME
-                }
+                },
+                onAvoidanceDecision = { localAvoidanceState = it.state },
             )
+        }
+    }
+}
+
+@Composable
+private fun RobotMapPane(
+    modifier: Modifier,
+    context: Context,
+    cameraPositionState: CameraPositionState,
+    currentLocation: LatLng?,
+    lastLocation: Location?,
+    robotHeading: Double?,
+    destinationLocation: LatLng?,
+    destinationName: String?,
+    routePoints: List<LatLng>,
+    routePolylineColor: Color,
+) {
+    var robotArrow by remember { mutableStateOf<BitmapDescriptor?>(null) }
+    GoogleMap(modifier = modifier, cameraPositionState = cameraPositionState) {
+        MapEffect(Unit) { robotArrow = headingArrowIcon(context) }
+        currentLocation?.let { location ->
+            Marker(
+                state = rememberUpdatedMarkerState(position = location),
+                title = "Current Location",
+                icon = robotArrow ?: BitmapDescriptorFactory.defaultMarker(),
+                rotation = (robotHeading ?: 0.0).toFloat(),
+                flat = true,
+                anchor = Offset(0.5f, 0.5f),
+            )
+            lastLocation?.let { fix ->
+                Circle(
+                    center = location,
+                    radius = fix.accuracy.toDouble(),
+                    fillColor = Color(0x221B5E20),
+                    strokeColor = Color(0x661B5E20),
+                    strokeWidth = 2f,
+                )
+            }
+        }
+        destinationLocation?.let { location ->
+            Marker(
+                state = rememberUpdatedMarkerState(position = location),
+                title = destinationName ?: "Destination",
+            )
+        }
+        if (routePoints.isNotEmpty()) {
+            Polyline(points = routePoints, color = routePolylineColor, width = 12f)
         }
     }
 }
 
 /** One decision per tick for the route follower. */
 private const val FOLLOW_TICK_MS = 100L
+private const val ROUTE_DIRECTION_ERROR_DEGREES = 5.0
 
 /** The screens: the controls, the live map, and the manual drive tuning page. */
 private enum class Screen { Controls, ConfigureRobot }

@@ -1,6 +1,7 @@
 package com.example.guidedogtest
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -20,8 +21,8 @@ class MotorSettingsTest {
         assertEquals("c180,128\n", defaults.forward.frame())
 
         // Pivots are asymmetric for the same reason - the right pair is weaker.
-        assertEquals(WheelSpeeds(-190, 170), defaults.left)
-        assertEquals(WheelSpeeds(190, -180), defaults.right)
+        assertEquals(WheelSpeeds(-205, 190), defaults.left)
+        assertEquals(WheelSpeeds(205, -195), defaults.right)
     }
 
     @Test
@@ -52,5 +53,14 @@ class MotorSettingsTest {
         assertEquals(WheelSpeeds(-140, 140), edited.left)
         assertEquals(defaults.forward, edited.forward)
         assertEquals(defaults.right, edited.right)
+    }
+
+    @Test fun movementIsRaisedToEachEffectiveMinimumButStopIsZero() {
+        assertEquals(MotorTuning.MIN_EFFECTIVE_LEFT_POWER, MotorTuning.enforceMinimumLeft(1))
+        assertEquals(-MotorTuning.MIN_EFFECTIVE_RIGHT_POWER, MotorTuning.enforceMinimumRight(-1))
+        assertEquals(0, MotorTuning.enforceMinimumLeft(0))
+        assertEquals(0, MotorTuning.enforceMinimumRight(0))
+        assertTrue(MotorTuning.MIN_EFFECTIVE_LEFT_POWER <= Drive.MAX_PWM)
+        assertTrue(MotorTuning.MIN_EFFECTIVE_RIGHT_POWER <= Drive.MAX_PWM)
     }
 }

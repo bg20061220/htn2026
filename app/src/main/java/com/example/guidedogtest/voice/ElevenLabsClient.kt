@@ -30,6 +30,12 @@ class ElevenLabsClient(private val apiKey: String, private val context: Context)
     private val scope = CoroutineScope(Dispatchers.IO)
     private var mediaPlayer: MediaPlayer? = null
 
+    fun interrupt() {
+        client.dispatcher.cancelAll()
+        mediaPlayer?.release()
+        mediaPlayer = null
+    }
+
     /**
      * Downloads and plays [text] as speech, calling [onDone] once playback
      * actually finishes (or immediately, on any failure, so the caller's
@@ -103,7 +109,6 @@ class ElevenLabsClient(private val apiKey: String, private val context: Context)
     }
 
     fun release() {
-        mediaPlayer?.release()
-        mediaPlayer = null
+        interrupt()
     }
 }

@@ -86,6 +86,8 @@ class ConversationManager(
 
     private var followUpTimeoutJob: Job? = null
     private var activeRequestJob: Job? = null
+    private var activeSpeechPriority: VoicePriority? = null
+    private var speechGeneration = 0L
 
     // Set while waiting for the user to say yes/no to a proposed
     // destination. Non-null means the next transcript is treated as a
@@ -110,11 +112,14 @@ class ConversationManager(
      * Pausing wake-word recognition prevents Goose from hearing its own alert.
      */
     fun speakObstacleAlert(text: String): Boolean {
-        if (_state.value != ConversationState.LISTENING_FOR_WAKE_WORD || text.isBlank()) return false
-        wakeWordDetector.pause()
-        _state.value = ConversationState.SPEAKING
-        speak(text) { returnToWakeWordListening() }
-        return true
+        return requestSpeech(text, VoicePriority.NEARBY_OBJECT)
+    }
+
+    fun speakAvoidanceAlert(text: String, priority: VoicePriority): Boolean =
+        requestSpeech(text, priority)
+
+    fun announceEmergencyStop() {
+        requestSpeech("Stopping now.", VoicePriority.EMERGENCY_STOP)
     }
 
     /**
@@ -125,10 +130,29 @@ class ConversationManager(
      * talk over itself, so a burst of step changes cannot queue up a wall of speech.
      */
     fun announce(text: String): Boolean {
-        if (_state.value == ConversationState.SPEAKING || text.isBlank()) return false
+        return requestSpeech(text, VoicePriority.NORMAL)
+    }
+
+    private fun requestSpeech(text: String, priority: VoicePriority): Boolean {
+        if (text.isBlank()) return false
+        val currentPriority = activeSpeechPriority
+        val idle = _state.value == ConversationState.LISTENING_FOR_WAKE_WORD
+        if (!idle && currentPriority != null && priority.level <= currentPriority.level) return false
+        // Conversation owns the microphone unless the path itself is unsafe. Avoidance directions
+        // may replace an object alert, but do not cut off an active user turn.
+        if (!idle && currentPriority == null && priority.level < VoicePriority.UNSAFE_PATH.level) return false
+
+        speechGeneration++
+        elevenLabsClient.interrupt()
+        followUpTimeoutJob?.cancel()
+        speechCapture.stopListening()
         wakeWordDetector.pause()
+        activeSpeechPriority = priority
         _state.value = ConversationState.SPEAKING
-        speak(text) { returnToWakeWordListening() }
+        speak(text) {
+            activeSpeechPriority = null
+            returnToWakeWordListening()
+        }
         return true
     }
 
@@ -334,9 +358,10 @@ class ConversationManager(
         // Never feed ElevenLabs output into the emergency matcher: pause recognition before audio.
         wakeWordDetector.pause()
         _lastSpoken.value = text
+        val generation = ++speechGeneration
         elevenLabsClient.speak(text) {
             Log.d(TAG, "Speak done: $text")
-            onDone()
+            if (generation == speechGeneration) onDone()
         }
     }
 

@@ -175,9 +175,9 @@ class RouteFollowerTest {
 
     /** What the page is for: values tuned there are the values a route drives with. */
     private val tunedAway = MotorSettings(
-        forward = WheelSpeeds(60, 55),
-        left = WheelSpeeds(-90, 80),
-        right = WheelSpeeds(70, -65),
+        forward = WheelSpeeds(160, 145),
+        left = WheelSpeeds(-150, 140),
+        right = WheelSpeeds(155, -145),
     )
 
     @Test
@@ -187,7 +187,7 @@ class RouteFollowerTest {
             tuning = { tunedAway },
         )
 
-        assertEquals(Command.Drive(60, 55), follower.update(fix(origin.lat, origin.lng), 1.0))
+        assertEquals(Command.Drive(160, 145), follower.update(fix(origin.lat, origin.lng), 1.0))
     }
 
     @Test
@@ -195,13 +195,13 @@ class RouteFollowerTest {
         val follower = RouteFollower(listOf(eastStep()), tuning = { tunedAway })
 
         val right = follower.update(fix(origin.lat, origin.lng, heading = 0.0), 1.0) as Command.Pivot
-        assertEquals(70, right.left)
-        assertEquals(-65, right.right)
+        assertEquals(155, right.left)
+        assertEquals(-145, right.right)
 
         val west = RouteFollower(listOf(step(200, origin.lat, origin.lng - 0.002)), tuning = { tunedAway })
         val left = west.update(fix(origin.lat, origin.lng, heading = 0.0), 1.0) as Command.Pivot
-        assertEquals(-90, left.left)
-        assertEquals(80, left.right)
+        assertEquals(-150, left.left)
+        assertEquals(140, left.right)
     }
 
     @Test
@@ -214,8 +214,8 @@ class RouteFollowerTest {
             follower.update(fix(origin.lat, origin.lng), 1.0),
         )
 
-        tuning = MotorSettings(forward = WheelSpeeds(40, 30))
-        assertEquals(Command.Drive(40, 30), follower.update(fix(origin.lat, origin.lng), 1.0))
+        tuning = MotorSettings(forward = WheelSpeeds(140, 120))
+        assertEquals(Command.Drive(140, 120), follower.update(fix(origin.lat, origin.lng), 1.0))
     }
 
     @Test

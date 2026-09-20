@@ -9,6 +9,28 @@ data class WheelSpeeds(val left: Int, val right: Int) {
     fun frame(): String = Drive.frame(left, right)
 }
 
+/** One place for chassis-specific PWM tuning. Values are raw signed firmware PWM. */
+object MotorTuning {
+    const val MIN_EFFECTIVE_LEFT_POWER = 110
+    const val MIN_EFFECTIVE_RIGHT_POWER = 110
+    const val MIN_EFFECTIVE_MOTOR_SPEED = MIN_EFFECTIVE_LEFT_POWER
+    const val MANUAL_FORWARD_LEFT = 180
+    const val MANUAL_FORWARD_RIGHT = 128
+    const val MANUAL_TURN_OUTER = 205
+    const val MANUAL_TURN_INNER_LEFT = 190
+    const val MANUAL_TURN_INNER_RIGHT = 195
+
+    fun enforceMinimum(value: Int): Int = enforceMinimumFor(value, MIN_EFFECTIVE_MOTOR_SPEED)
+    fun enforceMinimumLeft(value: Int): Int = enforceMinimumFor(value, MIN_EFFECTIVE_LEFT_POWER)
+    fun enforceMinimumRight(value: Int): Int = enforceMinimumFor(value, MIN_EFFECTIVE_RIGHT_POWER)
+
+    private fun enforceMinimumFor(value: Int, minimum: Int): Int = when {
+        value == 0 -> 0
+        value > 0 -> value.coerceAtLeast(minimum).coerceAtMost(Drive.MAX_PWM)
+        else -> value.coerceAtMost(-minimum).coerceAtLeast(-Drive.MAX_PWM)
+    }
+}
+
 /**
  * The manual drive values, edited on the Configure Robot page and kept across launches.
  *
@@ -19,12 +41,12 @@ data class WheelSpeeds(val left: Int, val right: Int) {
  * The defaults are the numbers measured on this chassis, and they are not symmetric:
  *
  *  - forward `180 / 128` - the right pair is weaker, so it gets 52 less.
- *  - left `-190 / 170` and right `190 / -180` - a pivot is asymmetric too, for the same reason.
+ *  - left `-205 / 190` and right `205 / -195` - stronger asymmetric pivots from robot testing.
  */
 data class MotorSettings(
-    val forward: WheelSpeeds = WheelSpeeds(Drive.SPEED, Drive.SPEED - Drive.RIGHT_TRIM),
-    val left: WheelSpeeds = WheelSpeeds(-190, 170),
-    val right: WheelSpeeds = WheelSpeeds(190, -180),
+    val forward: WheelSpeeds = WheelSpeeds(MotorTuning.MANUAL_FORWARD_LEFT, MotorTuning.MANUAL_FORWARD_RIGHT),
+    val left: WheelSpeeds = WheelSpeeds(-MotorTuning.MANUAL_TURN_OUTER, MotorTuning.MANUAL_TURN_INNER_LEFT),
+    val right: WheelSpeeds = WheelSpeeds(MotorTuning.MANUAL_TURN_OUTER, -MotorTuning.MANUAL_TURN_INNER_RIGHT),
 ) {
 
     /** The wheel pair a manual command drives with. Anything else - including STOP - releases. */
@@ -32,6 +54,7 @@ data class MotorSettings(
         "FORWARD" -> forward
         "LEFT" -> left
         "RIGHT" -> right
+        "BACK" -> WheelSpeeds(-forward.left, -forward.right)
         else -> WheelSpeeds(0, 0)
     }
 
@@ -65,7 +88,7 @@ object MotorSettingsStore {
         val prefs = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
         val defaults = MotorSettings()
 
-        return MotorSettings(
+        val stored = MotorSettings(
             forward = WheelSpeeds(
                 prefs.getInt(KEY_FORWARD_LEFT, defaults.forward.left),
                 prefs.getInt(KEY_FORWARD_RIGHT, defaults.forward.right),
@@ -78,6 +101,14 @@ object MotorSettingsStore {
                 prefs.getInt(KEY_RIGHT_LEFT, defaults.right.left),
                 prefs.getInt(KEY_RIGHT_RIGHT, defaults.right.right),
             ),
+        )
+        // Upgrade the old shipped turn defaults after the physical robot showed insufficient pivot
+        // torque. Custom values above the effective minimum are preserved.
+        val migratedLeft = if (stored.left == WheelSpeeds(-190, 170)) defaults.left else stored.left
+        val migratedRight = if (stored.right == WheelSpeeds(190, -180)) defaults.right else stored.right
+        return stored.copy(
+            left = migratedLeft.withMinimumPower(),
+            right = migratedRight.withMinimumPower(),
         )
     }
 
@@ -93,3 +124,8 @@ object MotorSettingsStore {
             .apply()
     }
 }
+
+private fun WheelSpeeds.withMinimumPower() = WheelSpeeds(
+    MotorTuning.enforceMinimum(left),
+    MotorTuning.enforceMinimum(right),
+)

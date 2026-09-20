@@ -247,7 +247,7 @@ class RouteFollower(
     }
 
     private fun scale(pwm: Int, factor: Double): Int =
-        Geo.clampPwm((pwm * factor).roundToInt())
+        MotorTuning.enforceMinimum(Geo.clampPwm((pwm * factor).roundToInt()))
 
     private fun steer(fix: Fix, target: GeoPoint): Int {
         val error = bearingErrorDegrees(fix, target) ?: return 0
@@ -257,8 +257,8 @@ class RouteFollower(
     }
 
     private fun steeredLeft(fix: Fix, target: GeoPoint) =
-        Geo.clampPwm(tuning().forward.left + steer(fix, target))
+        MotorTuning.enforceMinimum(Geo.clampPwm(tuning().forward.left + steer(fix, target)))
 
     private fun steeredRight(fix: Fix, target: GeoPoint) =
-        Geo.clampPwm(tuning().forward.right - steer(fix, target))
+        MotorTuning.enforceMinimum(Geo.clampPwm(tuning().forward.right - steer(fix, target)))
 }
