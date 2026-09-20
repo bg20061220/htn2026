@@ -78,6 +78,7 @@ fun NavigationScreen() {
     var screen by remember { mutableStateOf(Screen.Controls) }
 
     // The phone's compass: the follower aligns to this, because GPS course says nothing at rest.
+    // The landscape mount is applied inside it, by ROBOT_HEADING_OFFSET_DEGREES.
     val headingSource = remember { HeadingSource(context) }
 
     // The manual drive values, edited on the Configure Robot page and kept across launches.
@@ -332,6 +333,9 @@ fun NavigationScreen() {
                 stopFollowing()
                 command = it
             },
+            rawHeading = headingSource.rawHeadingDegrees,
+            robotHeading = headingSource.headingDegrees,
+            offsetDegrees = headingSource.offsetDegrees,
             connected = link.connected,
             linkStatus = link.status,
             onConnect = { connectRobot() },
@@ -555,7 +559,9 @@ fun NavigationScreen() {
                     result
                         .onSuccess { steps ->
                             routeSteps = steps
-                            follower = RouteFollower(steps)
+                            // The follower reads the tuned wheel values every tick, so what is set
+                            // on the Configure Robot page is what a route drives.
+                            follower = RouteFollower(steps, tuning = { motorSettings })
                             routeStatus =
                                 "${steps.size} steps, ${steps.sumOf { it.distanceMeters }} m"
                         }

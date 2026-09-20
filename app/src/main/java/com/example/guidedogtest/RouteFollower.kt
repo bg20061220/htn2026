@@ -3,6 +3,7 @@ package com.example.guidedogtest
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
 
@@ -96,12 +97,18 @@ object Geo {
  * as it is inside the tolerance - so a 45 degree turn cannot overshoot into a 60 degree one the
  * way a timed spin does.
  *
- * All of this is pure logic - it is fed a [Fix] and a time delta and returns a [Command], which is
- * what makes it testable without a robot, a phone or a network.
+ * The wheel values are not constants: they come from [tuning], which is the same [MotorSettings] the
+ * Configure Robot page edits. Tuning the car on that page therefore tunes the route driving too, and
+ * because the provider is read every tick, a value changed mid-route takes effect on the next one.
+ *
+ * All of this is pure logic - it is fed a [Fix], a time delta and the current tuning, and returns a
+ * [Command], which is what makes it testable without a robot, a phone or a network.
  */
 class RouteFollower(
     private val steps: List<RouteStep>,
     private val config: Config = Config(),
+    /** The tuned wheel values, read every tick. Defaults to the calibrated ones. */
+    private val tuning: () -> MotorSettings = { MotorSettings() },
 ) {
 
     data class Config(
@@ -109,9 +116,7 @@ class RouteFollower(
         val arriveRadiusMeters: Double = 8.0,
         /** Refuse to drive on a fix worse than this - a car is not a car if it does not know where it is. */
         val maxAccuracyMeters: Double = 30.0,
-        /** Straight-line command, already carrying the chassis trim. */
-        val baseLeft: Int = Drive.SPEED,
-        val baseRight: Int = Drive.SPEED - Drive.RIGHT_TRIM,
+        /** How much of the straight-line command the bearing error may add or take away. */
         val steerGain: Double = 1.2,
         val maxSteer: Int = 60,
         /**
@@ -123,8 +128,12 @@ class RouteFollower(
         val alignStartDegrees: Double = 25.0,
         /** ...and the tighter one that ends the rotation, so it never hunts past the target. */
         val alignStopDegrees: Double = 10.0,
-        /** Rotation PWM ramps from [Drive.TURN_MIN] at the stop threshold to [Drive.TURN_MAX]. */
-        val turnPwmPerDegree: Double = 0.4,
+        /**
+         * How much of the tuned turn the car uses as it closes on the bearing: full effort at
+         * [alignStartDegrees], this fraction of it at [alignStopDegrees]. Raise it towards 1.0 if the
+         * car stalls in the last few degrees instead of creeping.
+         */
+        val turnCreepFraction: Double = 0.75,
         /** Give up if the distance to the current target has not shrunk in this long. */
         val stuckSeconds: Double = 15.0,
         val minProgressMeters: Double = 3.0,
@@ -206,21 +215,39 @@ class RouteFollower(
     }
 
     /**
-     * A slow in-place rotation toward the target bearing. The speed ramps with the error - quick-ish
-     * while it is far off, barely moving over the last few degrees - and the wheels stay symmetric,
-     * because a trimmed spin is an arc, not a rotation.
+     * An in-place rotation toward the target bearing, using the wheel pair tuned for that direction
+     * on the Configure Robot page.
+     *
+     * The tuned pair is the car's own answer to "what does this chassis need to rotate", so it is
+     * used as-is when the error is wide - that is the moment a rotation starts - and eased back
+     * towards [Config.turnCreepFraction] of it as the bearing closes, which is what keeps a slow
+     * closed loop from overshooting. Scaling the pair rather than replacing it keeps the asymmetry
+     * the chassis needs: on this robot a right turn is not the mirror of a left one.
      */
     private fun pivot(error: Double): Command {
-        val pwm = (Drive.TURN_MIN + (abs(error) - config.alignStopDegrees) * config.turnPwmPerDegree)
-            .toInt()
-            .coerceIn(Drive.TURN_MIN, Drive.TURN_MAX)
+        val turn = if (error > 0) tuning().right else tuning().left
+        val factor = turnFactor(abs(error))
 
-        return if (error > 0) {
-            Command.Pivot(error, left = pwm, right = -pwm)
-        } else {
-            Command.Pivot(error, left = -pwm, right = pwm)
-        }
+        return Command.Pivot(
+            degrees = error,
+            left = scale(turn.left, factor),
+            right = scale(turn.right, factor),
+        )
     }
+
+    /** Full tuned effort at [Config.alignStartDegrees], [Config.turnCreepFraction] of it at the stop. */
+    private fun turnFactor(off: Double): Double {
+        val start = config.alignStartDegrees
+        val stop = config.alignStopDegrees
+        if (off >= start) return 1.0
+
+        val span = (start - stop).coerceAtLeast(1.0)
+        val travelled = (off - stop).coerceIn(0.0, span)
+        return config.turnCreepFraction + (1.0 - config.turnCreepFraction) * (travelled / span)
+    }
+
+    private fun scale(pwm: Int, factor: Double): Int =
+        Geo.clampPwm((pwm * factor).roundToInt())
 
     private fun steer(fix: Fix, target: GeoPoint): Int {
         val error = bearingErrorDegrees(fix, target) ?: return 0
@@ -229,7 +256,9 @@ class RouteFollower(
             .toInt()
     }
 
-    private fun steeredLeft(fix: Fix, target: GeoPoint) = Geo.clampPwm(config.baseLeft + steer(fix, target))
+    private fun steeredLeft(fix: Fix, target: GeoPoint) =
+        Geo.clampPwm(tuning().forward.left + steer(fix, target))
 
-    private fun steeredRight(fix: Fix, target: GeoPoint) = Geo.clampPwm(config.baseRight - steer(fix, target))
+    private fun steeredRight(fix: Fix, target: GeoPoint) =
+        Geo.clampPwm(tuning().forward.right - steer(fix, target))
 }

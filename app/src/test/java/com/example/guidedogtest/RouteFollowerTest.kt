@@ -132,19 +132,23 @@ class RouteFollowerTest {
     }
 
     @Test
-    fun turnSpeedRampsWithTheErrorAndStaysSymmetric() {
+    fun turnSpeedUsesTheTunedPairAndEasesOffNearTheBearing() {
         val follower = RouteFollower(listOf(eastStep()))
 
+        // Far off (90 degrees): the full pair tuned for a right turn.
         val wide = follower.update(fix(origin.lat, origin.lng, heading = 0.0), 1.0) as Command.Pivot
-        assertEquals(Drive.TURN_MAX, wide.left)
-        assertEquals(-Drive.TURN_MAX, wide.right)
+        assertEquals(MotorSettings().right.left, wide.left)
+        assertEquals(MotorSettings().right.right, wide.right)
 
-        // Just past the threshold the car creeps: a slow wheel cannot sail past the bearing.
-        val narrow =
+        // Closing on the bearing (26 degrees off, just past the start threshold): still full effort.
+        val stillWide =
             follower.update(fix(origin.lat, origin.lng, heading = 64.0), 1.0) as Command.Pivot
-        assertTrue("expected a creep, got ${narrow.left}", narrow.left < wide.left)
-        assertTrue(narrow.left >= Drive.TURN_MIN)
-        assertEquals(-narrow.left, narrow.right)
+        assertEquals(wide.left, stillWide.left)
+
+        // Nearly there (14 degrees off): a fraction of the same pair, same asymmetry.
+        val creep = follower.update(fix(origin.lat, origin.lng, heading = 76.0), 1.0) as Command.Pivot
+        assertTrue("expected a creep, got $creep", abs(creep.left) < abs(wide.left))
+        assertTrue(creep.left > 0 && creep.right < 0)
     }
 
     @Test
@@ -154,16 +158,64 @@ class RouteFollowerTest {
         val command = follower.update(fix(origin.lat, origin.lng, heading = 0.0), 1.0) as Command.Pivot
 
         assertTrue("expected a left turn, got ${command.degrees}", command.degrees < 0)
-        assertTrue("expected a left-hand pivot, got $command", command.left < 0 && command.right > 0)
+        assertEquals(MotorSettings().left.left, command.left)
+        assertEquals(MotorSettings().left.right, command.right)
     }
 
     @Test
-    fun pivotsStayInsideTheCalibratedRange() {
+    fun pivotMagnitudesNeverLeaveThePwmRange() {
         val follower = RouteFollower(listOf(eastStep()))
         val command = follower.update(fix(origin.lat, origin.lng, heading = 0.0), 1.0) as Command.Pivot
 
-        assertTrue(abs(command.left) in Drive.TURN_MIN..Drive.TURN_MAX)
-        assertTrue(abs(command.right) in Drive.TURN_MIN..Drive.TURN_MAX)
+        assertTrue(abs(command.left) <= Drive.MAX_PWM)
+        assertTrue(abs(command.right) <= Drive.MAX_PWM)
+    }
+
+    // --- the Configure Robot page drives routes -------------------------------------------------
+
+    /** What the page is for: values tuned there are the values a route drives with. */
+    private val tunedAway = MotorSettings(
+        forward = WheelSpeeds(60, 55),
+        left = WheelSpeeds(-90, 80),
+        right = WheelSpeeds(70, -65),
+    )
+
+    @Test
+    fun straightDrivingUsesTheTunedForwardPair() {
+        val follower = RouteFollower(
+            listOf(step(100, 43.48, -80.5449)),
+            tuning = { tunedAway },
+        )
+
+        assertEquals(Command.Drive(60, 55), follower.update(fix(origin.lat, origin.lng), 1.0))
+    }
+
+    @Test
+    fun turningUsesTheTunedPairsForEachDirection() {
+        val follower = RouteFollower(listOf(eastStep()), tuning = { tunedAway })
+
+        val right = follower.update(fix(origin.lat, origin.lng, heading = 0.0), 1.0) as Command.Pivot
+        assertEquals(70, right.left)
+        assertEquals(-65, right.right)
+
+        val west = RouteFollower(listOf(step(200, origin.lat, origin.lng - 0.002)), tuning = { tunedAway })
+        val left = west.update(fix(origin.lat, origin.lng, heading = 0.0), 1.0) as Command.Pivot
+        assertEquals(-90, left.left)
+        assertEquals(80, left.right)
+    }
+
+    @Test
+    fun aValueChangedMidRouteAppliesOnTheNextTick() {
+        var tuning = MotorSettings()
+        val follower = RouteFollower(listOf(step(100, 43.48, -80.5449)), tuning = { tuning })
+
+        assertEquals(
+            Command.Drive(Drive.SPEED, Drive.SPEED - Drive.RIGHT_TRIM),
+            follower.update(fix(origin.lat, origin.lng), 1.0),
+        )
+
+        tuning = MotorSettings(forward = WheelSpeeds(40, 30))
+        assertEquals(Command.Drive(40, 30), follower.update(fix(origin.lat, origin.lng), 1.0))
     }
 
     @Test

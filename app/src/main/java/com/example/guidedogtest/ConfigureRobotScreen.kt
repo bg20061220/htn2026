@@ -13,6 +13,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -27,6 +28,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import kotlin.math.abs
 
 /** The commands whose wheel speeds are worth tuning, in the order the page lists them. */
 private val TUNED_COMMANDS = listOf("FORWARD", "LEFT", "RIGHT")
@@ -39,6 +41,11 @@ private val TUNED_COMMANDS = listOf("FORWARD", "LEFT", "RIGHT")
  * a wheel pair, press its command, watch what the chassis does, adjust. The values are saved as they
  * are typed, so a tuning session survives closing the app.
  *
+ * It also carries the **compass calibration readout**: the raw phone heading, the corrected robot
+ * heading and the mounting offset between them. That readout is what makes the one-line
+ * `ROBOT_HEADING_OFFSET_DEGREES` constant in `Heading.kt` checkable on the robot: point the robot at
+ * a heading you know, and if the corrected value is 180 degrees out, the sign is the wrong way.
+ *
  * A command stays latched until another one is pressed - including across this page and the controls
  * screen - which is what makes one-handed tuning possible: set the numbers while the car is moving,
  * and press STOP when it is where you want it.
@@ -47,6 +54,9 @@ private val TUNED_COMMANDS = listOf("FORWARD", "LEFT", "RIGHT")
 fun ConfigureRobotScreen(
     settings: MotorSettings,
     onSettingsChange: (MotorSettings) -> Unit,
+    rawHeading: Double?,
+    robotHeading: Double?,
+    offsetDegrees: Double,
     command: String,
     onCommand: (String) -> Unit,
     connected: Boolean,
@@ -87,6 +97,19 @@ fun ConfigureRobotScreen(
         Spacer(modifier = Modifier.height(16.dp))
 
         Text("Robot Command: $command")
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Compass calibration readout: the raw phone heading, the corrected robot heading, and the
+        // mounting offset between them. Point the robot at a known heading and compare - if the
+        // corrected value is 180 degrees out, the sign of ROBOT_HEADING_OFFSET_DEGREES is the wrong way.
+        Text("Compass", style = MaterialTheme.typography.labelLarge)
+        Text("raw phone heading:  ${headingText(rawHeading)}", style = MaterialTheme.typography.bodySmall)
+        Text("robot heading:      ${headingText(robotHeading)}", style = MaterialTheme.typography.bodySmall)
+        Text(
+            "mounting offset:    ${signedDegrees(offsetDegrees)}",
+            style = MaterialTheme.typography.bodySmall,
+        )
 
         Spacer(modifier = Modifier.height(16.dp))
 
@@ -144,6 +167,10 @@ fun ConfigureRobotScreen(
         }
     }
 }
+
+/** "+90°" or "-90°" - the sign is the whole point of this number, so it is always shown. */
+private fun signedDegrees(degrees: Double): String =
+    (if (degrees < 0) "-" else "+") + abs(degrees).toInt() + "°"
 
 /**
  * A signed PWM entry.

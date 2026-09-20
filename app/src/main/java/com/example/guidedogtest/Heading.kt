@@ -13,14 +13,36 @@ import kotlin.math.abs
 import kotlin.math.atan2
 
 /**
+ * Rotation added to the phone's own heading to get the robot's.
+ *
+ * The phone sits flat on the robot's top plate in **landscape**, so the edge pointing down the road is
+ * one of its long edges - 90 degrees off the portrait top edge that Android's compass reports. This
+ * constant is the only place that correction lives: the sensor code stays raw, and everything that
+ * steers on a heading (route following, the map arrow, the readouts) sees the corrected value.
+ *
+ * - `+90` when the phone's **right** edge - the edge on your right looking at the phone in portrait -
+ *   points down the road.
+ * - `-90` when the **left** edge does.
+ * - `0` would mean a portrait mount with the top edge forward.
+ *
+ * The two landscape candidates are 180 degrees apart, so picking between them is a binary check on
+ * the robot: point it at a known heading and read the corrected value on the Configure Robot page. If
+ * it reads 180 degrees out, flip the sign. Nothing else about the mount is assumed anywhere else in
+ * the code.
+ */
+internal const val ROBOT_HEADING_OFFSET_DEGREES = 90.0
+
+/**
  * Which way the car is pointing, from the phone's rotation-vector sensor.
  *
  * GPS course cannot do this job: a receiver that is standing still reports no course at all, and the
  * robot turns on the spot. The rotation vector fuses accelerometer, gyroscope and magnetometer and
  * holds a heading at rest, which is what the follower aligns to.
  *
- * The phone is mounted flat on the robot with its camera end forward, so the heading is the bearing
- * of the phone's top edge - see [headingFromRotation] for the mount and how to change it.
+ * [headingDegrees] is the robot's forward direction - the raw phone heading turned by
+ * [ROBOT_HEADING_OFFSET_DEGREES]. [rawHeadingDegrees] is kept as well, because calibration needs to
+ * see both: the offset is applied in exactly one place, and it is applied before anything compares a
+ * heading to a bearing.
  *
  * Azimuth arrives as a magnetic bearing; [setLocation] adds the local declination so the result is a
  * true bearing, comparable with [Geo.bearingDegrees].
@@ -30,9 +52,16 @@ class HeadingSource(context: Context) : SensorEventListener {
     private val sensors = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
     private val rotationVector = sensors.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
 
-    /** True heading in degrees, 0 = north, 90 = east. Null until the sensor reports a value. */
+    /** The phone's own heading: its portrait top edge, true north, mount not applied. */
+    var rawHeadingDegrees by mutableStateOf<Double?>(null)
+        private set
+
+    /** The robot's forward direction in degrees, 0 = north, 90 = east. Null until the sensor reports. */
     var headingDegrees by mutableStateOf<Double?>(null)
         private set
+
+    /** The mounting offset in force, for the debug readout. */
+    val offsetDegrees: Double get() = ROBOT_HEADING_OFFSET_DEGREES
 
     /** Magnetic declination at the current fix; 0 until [setLocation] has been called. */
     private var declination = 0.0
@@ -63,13 +92,16 @@ class HeadingSource(context: Context) : SensorEventListener {
         if (event.sensor.type != Sensor.TYPE_ROTATION_VECTOR) return
 
         SensorManager.getRotationMatrixFromVector(rotation, event.values)
-        val heading = headingFromRotation(rotation, declination)
+
+        val raw = rawPhoneHeading(rotation, declination)
+        val robot = robotHeading(raw)
 
         // The sensor fires 16 times a second and every write here recomposes both screens, so a
         // stationary car's noise is dropped: only a real change is worth publishing.
-        val published = headingDegrees
-        if (published == null || abs(Geo.normalizeDegrees(heading - published)) >= HEADING_STEP_DEGREES) {
-            headingDegrees = heading
+        val published = rawHeadingDegrees
+        if (published == null || abs(Geo.normalizeDegrees(raw - published)) >= HEADING_STEP_DEGREES) {
+            rawHeadingDegrees = raw
+            headingDegrees = robot
         }
     }
 
@@ -82,27 +114,30 @@ class HeadingSource(context: Context) : SensorEventListener {
 }
 
 /**
- * Which way the phone's forward axis points, from a rotation matrix in Android's layout: the matrix
- * is row-major and takes device coordinates to world (east, north, up), so row 0 is the world's east
- * axis in device coordinates, row 1 is north, row 2 is up - and the *columns* are the device's axes
- * in the world. Reading the wrong column silently negates the heading, and a robot steering on a
- * negated heading turns the wrong way.
+ * The phone's own heading: where its portrait top edge points, in degrees true.
  *
- * The build decides which axis is forward, not the sensors: **the phone lies flat on the robot with
- * the camera end (its top edge, device `+Y`) pointing down the road**, so the heading is that edge's
- * bearing. Nothing here guesses, because guessing cannot work - a phone standing up in landscape has
- * two equally horizontal axes and picking the wrong one is a silent 90 degrees.
+ * The rotation matrix is Android's, row-major, taking device coordinates to world (east, north, up);
+ * row 0 is the world's east axis in device coordinates, row 1 is north, row 2 is up, so the *columns*
+ * are the device's axes in the world. Device `+Y` - the top edge - is column 1, hence indices 1 and 4.
+ * Reading the wrong column is a silent 90 degree error, which is why [HeadingTest] pins this.
  *
- * Mounted upright instead, with the back camera looking forward? Swap the two pairs below:
- * `-rotation[2]` for east and `-rotation[5]` for north (device `-Z` is the camera).
- *
- * [declination] is the local magnetic declination: magnetic north is not true north.
+ * [declination] turns the magnetic bearing into a true one.
  */
-internal fun headingFromRotation(rotation: FloatArray, declination: Double): Double {
+internal fun rawPhoneHeading(rotation: FloatArray, declination: Double): Double {
     val east = rotation[1].toDouble()
     val north = rotation[4].toDouble()
-
-    val magnetic = Math.toDegrees(atan2(east, north))
-
-    return (magnetic + declination + 360.0) % 360.0
+    return normaliseDegrees(Math.toDegrees(atan2(east, north)) + declination)
 }
+
+/**
+ * The robot's forward direction: the raw phone heading turned by the mounting [offsetDegrees].
+ *
+ * The single place the mount is applied, and the single place a heading is normalised into 0..360.
+ */
+internal fun robotHeading(
+    rawDegrees: Double,
+    offsetDegrees: Double = ROBOT_HEADING_OFFSET_DEGREES,
+): Double = normaliseDegrees(rawDegrees + offsetDegrees)
+
+/** Wraps any angle into 0..360. */
+private fun normaliseDegrees(degrees: Double): Double = (degrees % 360.0 + 360.0) % 360.0

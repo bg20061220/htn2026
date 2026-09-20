@@ -27,13 +27,10 @@ object Drive {
     const val RIGHT_TRIM = 52
 
     /**
-     * The follower's in-place rotation: deliberately slower than the manual pivots on the Configure
-     * Robot page, because a compass loop that turns slowly stops on the bearing instead of sailing
-     * past it. [TURN_MIN] is the creep used in the last few degrees, [TURN_MAX] the ceiling for a
-     * wide error. Raise [TURN_MIN] if the car stalls instead of turning on the floor.
+     * The follower's in-place rotation comes from the Configure Robot page: it scales the tuned
+     * turn pair for that direction rather than using a constant of its own, so what you tune is
+     * what a route drives. See [RouteFollower.Config.turnCreepFraction] for the ramp.
      */
-    const val TURN_MIN = 100
-    const val TURN_MAX = 130
 
     /** The frame that releases the motors. */
     const val STOP_FRAME = "c0,0\n"

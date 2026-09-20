@@ -6,26 +6,24 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 /**
- * The compass maths, checked against rotation matrices built by hand for the mounted attitude.
+ * The compass maths: the raw phone heading, and the single mounting offset that turns it into the
+ * robot's forward direction.
  *
- * This is the one place a wrong index silently negates the heading, and a robot steering on a
- * negated heading turns the wrong way - which is exactly the bug these tests were written for.
- * The matrix layout is Android's: row-major, device -> world (east, north, up).
- *
- * The robot's mount is a phone lying flat with its camera end forward, so that is the attitude
- * these cover. See [headingFromRotation] for what to change if it is ever mounted upright.
+ * A wrong matrix index rotates the heading by a multiple of 90 degrees and a wrong offset flips it by
+ * 180 - both make the robot turn the wrong way - so both halves are pinned here. The matrix layout is
+ * Android's: row-major, device -> world (east, north, up), with device `+Y` (the phone's portrait top
+ * edge) in column 1.
  */
 class HeadingTest {
 
     /**
-     * Rotation matrix for the mounted phone: flat, screen up, top edge (the camera end) pointing at
-     * [headingDegrees].
+     * A phone lying flat, screen up, with its **portrait top edge** pointing at [topEdgeDegrees].
      *
-     * Rows are the world axes in device coordinates; the columns come out as the device axes in the
-     * world, so column 1 is device +Y - the axis the robot drives on.
+     * The robot's mount is landscape, so this is not the robot's forward direction - it is what the
+     * compass reports before [ROBOT_HEADING_OFFSET_DEGREES] is applied.
      */
-    private fun mounted(headingDegrees: Double): FloatArray {
-        val h = Math.toRadians(headingDegrees)
+    private fun flat(topEdgeDegrees: Double): FloatArray {
+        val h = Math.toRadians(topEdgeDegrees)
         return floatArrayOf(
             cos(h).toFloat(), sin(h).toFloat(), 0f, // world east  = (cos, sin, 0)
             (-sin(h)).toFloat(), cos(h).toFloat(), 0f, // world north = (-sin, cos, 0)
@@ -34,23 +32,53 @@ class HeadingTest {
     }
 
     @Test
-    fun readsTheCameraEndOfThePhone() {
-        assertEquals(0.0, headingFromRotation(mounted(0.0), 0.0), 0.5)
-        assertEquals(45.0, headingFromRotation(mounted(45.0), 0.0), 0.5)
-        assertEquals(90.0, headingFromRotation(mounted(90.0), 0.0), 0.5)
-        assertEquals(180.0, headingFromRotation(mounted(180.0), 0.0), 0.5)
-        assertEquals(270.0, headingFromRotation(mounted(270.0), 0.0), 0.5)
+    fun rawHeadingReadsThePhonesTopEdge() {
+        assertEquals(0.0, rawPhoneHeading(flat(0.0), 0.0), 0.5)
+        assertEquals(45.0, rawPhoneHeading(flat(45.0), 0.0), 0.5)
+        assertEquals(90.0, rawPhoneHeading(flat(90.0), 0.0), 0.5)
+        assertEquals(180.0, rawPhoneHeading(flat(180.0), 0.0), 0.5)
+        assertEquals(270.0, rawPhoneHeading(flat(270.0), 0.0), 0.5)
     }
 
     @Test
-    fun declinationIsAddedToMagneticNorth() {
+    fun rawHeadingIsCorrectedForDeclination() {
         // Waterloo sits about 9.5 degrees west, so true heading = magnetic - 9.5.
-        assertEquals(350.5, headingFromRotation(mounted(0.0), -9.5), 0.001)
-        assertEquals(80.5, headingFromRotation(mounted(90.0), -9.5), 0.001)
+        assertEquals(350.5, rawPhoneHeading(flat(0.0), -9.5), 0.001)
+        assertEquals(80.5, rawPhoneHeading(flat(90.0), -9.5), 0.001)
     }
 
     @Test
-    fun headingWrapsInsteadOfGoingNegative() {
-        assertEquals(355.0, headingFromRotation(mounted(5.0), -10.0), 0.001)
+    fun theMountingOffsetTurnsThePhoneIntoTheRobot() {
+        // Landscape mount: the phone's top edge points sideways, so "forward" is 90 degrees away.
+        assertEquals(120.0, robotHeading(30.0, 90.0), 0.001)
+        assertEquals(300.0, robotHeading(30.0, -90.0), 0.001)
+
+        // Which is the whole of the +/-90 choice: the two candidates are 180 degrees apart.
+        assertEquals(180.0, robotHeading(120.0, 90.0) - robotHeading(120.0, -90.0), 0.001)
+    }
+
+    @Test
+    fun theDefaultOffsetIsTheConstant() {
+        assertEquals(ROBOT_HEADING_OFFSET_DEGREES, robotHeading(0.0), 0.001)
+
+        // The mounted case: the phone's top edge points west, so with a +90 mount the robot's forward
+        // direction - its right edge - points north.
+        val raw = rawPhoneHeading(flat(270.0), 0.0)
+        assertEquals(0.0, robotHeading(raw), 0.001)
+    }
+
+    @Test
+    fun theOffsetIsAppliedExactlyOnce() {
+        // Top edge south, +90 mount: the robot points west. Applying the offset twice would say east.
+        val raw = rawPhoneHeading(flat(180.0), 0.0)
+        assertEquals(270.0, robotHeading(raw, 90.0), 0.001)
+    }
+
+    @Test
+    fun headingsStayInZeroToThreeSixty() {
+        assertEquals(30.0, robotHeading(300.0, 90.0), 0.001)
+        assertEquals(280.0, robotHeading(10.0, -90.0), 0.001)
+        assertEquals(0.0, robotHeading(0.0, 360.0), 0.001)
+        assertEquals(350.0, rawPhoneHeading(flat(5.0), -15.0), 0.001)
     }
 }

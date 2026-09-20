@@ -46,7 +46,7 @@ Doing this before the clock starts saves ~4 hours and a lot of panic. **The buil
 - [ ] Charge every battery. Bring a spare for the car.
 
 ### A5 — Mounting (EE1 + EE2)
-- [ ] Mount the phone on the top plate: rigid, **flat (screen up) with the camera end forward**, cables strain-relieved. The compass code reads the phone's top edge as "forward", so the camera end is what must point down the road.
+- [ ] Mount the phone on the top plate: rigid, **flat (screen up) in landscape**, so one of its long edges points down the road. Which one is the robot's forward direction is fixed by the single `ROBOT_HEADING_OFFSET_DEGREES` constant in `Heading.kt` — `+90` for the right edge, `-90` for the left — and confirmed with the Compass readout on the Configure Robot page.
 - [ ] Add the leash anchor point — it has to take the pull of a blindfolded walker.
 - [ ] Dry-fit everything, then photograph the assembled robot so re-assembly at the event is fast.
 
@@ -180,19 +180,19 @@ firmware then keeps both inputs high with the enable on, which brakes.
 and no pins are wired for them. Pins still free if that changes: GPIO38, GPIO39, GPIO40, GPIO48, plus
 the whole 4–13 / 15–18 range if you unplug the camera module.
 
-**Drive calibration — two places, on purpose.**
+**Drive calibration — one place.** FORWARD/LEFT/RIGHT on the **Configure Robot** page are what both
+*manual* and *automatic* driving use: the follower reads the same values every tick, so the straight
+line it drives is the tuned FORWARD pair and the rotation it makes is the tuned LEFT/RIGHT pair for
+that direction. Change a number and the next route frame uses it — no rebuild, no reflash.
 
-*Manual driving* (FORWARD/LEFT/RIGHT, the floor-testing commands) is tuned on the phone, on the
-**Configure Robot** page, and saved as you type it. Each command carries **both** wheel speeds,
-because this chassis runs crooked at equal values — the right pair is weaker — so "forward" is a pair
-of numbers, not one. The defaults are the values measured on this chassis: forward `180 / 128`,
-turns `-190 / 170` and `190 / -180` — the pivots are asymmetric for the same reason the straight line
-is. No rebuild, no reflash: change a number, press the command, watch the car.
+Each command carries **both** wheel speeds, because this chassis runs crooked at equal values — the
+right pair is weaker — so "forward" is a pair of numbers, not one, and a right turn is not the mirror
+of a left one. The defaults are the values measured on this chassis: forward `180 / 128`, turns
+`-190 / 170` and `190 / -180`.
 
-*Automatic driving* (the follower) still reads constants, because a route has to behave the same on
-every phone: `RouteFollower.Config.baseLeft` / `baseRight` (defaults `Drive.SPEED = 180` and
-`Drive.SPEED - Drive.RIGHT_TRIM = 128` in `app/src/main/java/com/example/guidedogtest/RobotLink.kt`,
-so the follower drives the same straight line the FORWARD command does).
+The only wheel constants left in code are `Drive.SPEED` and `Drive.RIGHT_TRIM` in
+`app/src/main/java/com/example/guidedogtest/RobotLink.kt` — they are the *defaults* the page starts
+from, not a second source of truth.
 
 The trim lives in the app, not the firmware, so raw-frame tools (the laptop teleop, the OpenBot app)
 will still pull slightly to one side. That is expected: `c<left>,<right>` stays honest PWM.
@@ -287,10 +287,11 @@ one.
 
 The heading comes from the phone's **compass** (`HeadingSource`, rotation-vector sensor), not from the
 GPS course: a receiver that is standing still reports no course at all, and the robot turns on the
-spot. The phone lies flat with its camera end forward, so the heading is that end's bearing — the
-mount is an assumption in the code, not something it guesses at runtime (see the compass checks
-below). Local magnetic declination is added from the fix, so the compass reads true north like the
-GPS bearings do.
+spot. The phone is flat on the plate in landscape, so Android's compass — which reports the phone's
+portrait top edge — is 90° off the robot's forward direction; `HeadingSource` turns it by the single
+`ROBOT_HEADING_OFFSET_DEGREES` constant in `Heading.kt`, so everything downstream (route following,
+the map arrow, the readouts) sees the robot's heading. Local magnetic declination is added from the
+fix, so the compass reads true north like the GPS bearings do.
 
 **Live location screen:** **LIVE MAP** on the main screen opens a full-screen **Google map** that
 follows the phone: a green arrow for the car rotated to its heading, a ring for the GPS accuracy, one
@@ -307,19 +308,19 @@ because that is where the SDK looks; `BuildConfig.MAPS_API_KEY` is only for the 
 without Maps SDK enabled shows a grey map with the Google logo and an authorization failure in
 logcat — check there first if the map ever comes up blank.
 
-**What to calibrate on the floor** — all in `RouteFollower.Config`
-(`app/src/main/java/com/example/guidedogtest/RouteFollower.kt`):
+**What to calibrate on the floor.** The wheel values themselves are not here — they are on the
+**Configure Robot** page, because the follower drives the tuned pairs (see *Drive calibration*
+above). What is left in `RouteFollower.Config`
+(`app/src/main/java/com/example/guidedogtest/RouteFollower.kt`) is how the follower *uses* them:
 
 | Knob | Default | How to set it |
 |---|---|---|
 | `alignStartDegrees` | 25° | heading error that stops the car and starts a rotation — lower it if the car veers off the line, raise it if it keeps stopping |
 | `alignStopDegrees` | 10° | error that ends the rotation; keep it well below `alignStartDegrees` or it chatters |
-| `turnPwmPerDegree` | 0.4 | how fast the rotation ramps from `Drive.TURN_MIN` to `Drive.TURN_MAX` |
-| `Drive.TURN_MIN` / `TURN_MAX` | 100 / 130 | in `RobotLink.kt`. **The manual pivots on the Configure Robot page are the reference for what this chassis needs to rotate at all** (`-190 / 170`). If the car stalls or judders instead of turning during a route, raise `TURN_MIN` towards those numbers — a closed compass loop that cannot move the wheels never closes. Both are deliberately slower than the manual turns so the loop can stop on the bearing |
+| `turnCreepFraction` | 0.75 | how much of the tuned turn is used at `alignStopDegrees` (full effort at `alignStartDegrees`). Raise towards 1.0 if the car stalls instead of creeping in the last few degrees |
 | `arriveRadiusMeters` | 8 m | how close counts as "reached this step" — GPS is coarse, keep it generous |
 | `steerGain` / `maxSteer` | 1.2 / 60 | the driving-phase correction; raise if it wanders, lower if it oscillates |
 | `maxAccuracyMeters` | 30 m | the robot refuses to drive on a fix worse than this |
-| `baseLeft` / `baseRight` | 180 / 128 | the chassis trim (same numbers as `Drive`) |
 
 **Theme: the app is deliberately light-only.** `MainActivity` calls `GuideDogTestTheme(darkTheme =
 false)` and paints a `Surface` from the scheme. The window theme is `android:Theme.Material.Light`
@@ -342,6 +343,9 @@ mounted on the car and nobody reads it while the robot walks.
 
 - Values are raw PWM, −255…255, one box per side, and are **saved as they are typed**
   (`MotorSettingsStore` → SharedPreferences), so a tuning session survives closing the app.
+- **These are the values routes drive with.** The follower reads them every tick, so the tuned FORWARD
+  pair is the straight line a route drives and the tuned LEFT/RIGHT pair is the rotation it makes —
+  a number changed mid-route applies on the next tick.
 - A command **stays latched** until another is pressed, across pages: set the numbers while the car
   is rolling, press STOP when it is where you want it. The main screen keeps showing
   `Robot Command: …` so a latched command is never invisible.
@@ -352,15 +356,25 @@ mounted on the car and nobody reads it while the robot walks.
 **Check the compass before trusting it.** The heading maths is pinned by `HeadingTest`, so what is
 left to check is the phone, and there are three traps:
 
-1. **The mount is the code's assumption: flat, screen up, camera end forward.** The heading is the
-   bearing of the phone's top edge (`headingFromRotation` in `Heading.kt`). If the phone is ever
-   mounted upright with the camera looking forward, that function needs its two indices swapped —
-   it is a one-line change and the comment there says which. It is *not* auto-detected on purpose: a
-   phone standing up in landscape has two equally horizontal axes, so guessing is a silent 90°.
-2. **Compare against a compass app's TRUE heading, not its magnetic one** — ours is
-   declination-corrected. On the bench: open our app, note `Heading:`, open a compass app, note its
-   *true heading*. They should agree within a few degrees (measured 2° on the S21, flat on a desk).
-   A compass app reads the phone's top edge too, so this check is exactly the mount we drive on.
+1. **The mount is one constant, and it is the only assumption in the code:**
+   `ROBOT_HEADING_OFFSET_DEGREES` in `Heading.kt` — `+90` if the phone's right edge points down the
+   road, `-90` if its left edge does, `0` for a portrait mount. Raw readings stay raw
+   (`rawHeadingDegrees`); the offset is applied once, in `robotHeading`, before anything compares a
+   heading to a bearing. How to decide the sign on the physical robot is below.
+2. **Calibrate the sign on the robot, once.** Open **CONFIGURE ROBOT** — the Compass block shows
+   `raw phone heading`, `robot heading` and `mounting offset`. Point the robot's nose at a heading you
+   know (a compass held against its side, or due north by any means) and read `robot heading`:
+
+   | What you see | What it means |
+   |---|---|
+   | `robot heading` ≈ the heading you pointed at | sign is right, done |
+   | `robot heading` ≈ 180° away from it | flip the sign: `+90` ↔ `-90`, rebuild |
+   | `robot heading` ≈ 90° away from it | the phone is mounted portrait, not landscape — set `0` |
+
+   Because the two landscape candidates are exactly 180° apart, this is a binary check: it can never
+   be "sort of right". The `raw phone heading` on the same screen should sit 90° off `robot heading`
+   in a landscape mount, which is the cross-check that the mount is what you think it is.
+
 3. **Keep the phone away from magnets and motors.** A phone sitting next to a motor or a laptop read
    **618–727 µT** here (Earth is ~50 µT), and *any* compass jumps around in a field that dirty —
    ours went 261° → 128° as the disturbance settled. If the arrow wanders while the car is still,
